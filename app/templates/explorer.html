@@ -1,0 +1,1479 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ folder_name }} — File Explorer</title>
+<link href="https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+    --win-bg: #f0f0f0;
+    --win-toolbar: #f5f5f5;
+    --win-sidebar: #ffffff;
+    --win-content: #ffffff;
+    --win-border: #e0e0e0;
+    --win-select: #cce8ff;
+    --win-select-border: #99d1ff;
+    --win-hover: #e5f3ff;
+    --win-text: #1a1a1a;
+    --win-text-muted: #6d6d6d;
+    --win-accent: #0078d4;
+    --win-header-bg: #f9f9f9;
+    --preview-bg: #fafafa;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { height:100%; overflow:hidden; }
+body {
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    font-size: 13px;
+    color: var(--win-text);
+    background: var(--win-bg);
+    display: flex;
+    flex-direction: column;
+    user-select: none;
+}
+
+/* ── TOOLBAR ── */
+.toolbar {
+    background: var(--win-toolbar);
+    border-bottom: 1px solid var(--win-border);
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    gap: 2px;
+    flex-shrink: 0;
+    height: 40px;
+}
+.tb-btn {
+    background: none; border: none; padding: 6px 10px; border-radius: 4px;
+    cursor: pointer; font-size: 13px; color: var(--win-text); display: flex;
+    align-items: center; gap: 5px; white-space: nowrap;
+}
+.tb-btn:hover { background: var(--win-hover); }
+.tb-btn.active { background: var(--win-select); }
+.tb-sep { width:1px; height:20px; background: var(--win-border); margin: 0 4px; }
+
+/* ── ADDRESS BAR ── */
+.address-bar {
+    background: var(--win-toolbar);
+    border-bottom: 1px solid var(--win-border);
+    display: flex; align-items: center;
+    padding: 4px 8px; gap: 6px; flex-shrink: 0; height: 36px;
+}
+.nav-buttons { display: flex; gap: 2px; }
+.nav-btn {
+    background: none; border: none; padding: 4px 8px; border-radius: 4px;
+    cursor: pointer; font-size: 16px; color: var(--win-text-muted);
+}
+.nav-btn:hover:not(:disabled) { background: var(--win-hover); color: var(--win-text); }
+.nav-btn:disabled { opacity: 0.3; cursor: default; }
+.breadcrumb-bar {
+    flex: 1; display: flex; align-items: center;
+    background: #fff; border: 1px solid var(--win-border); border-radius: 4px;
+    padding: 2px 8px; height: 28px; overflow: hidden;
+}
+.bc-item {
+    color: var(--win-text-muted); text-decoration: none; font-size: 12px;
+    padding: 2px 4px; border-radius: 3px; white-space: nowrap;
+}
+.bc-item:hover { background: var(--win-hover); color: var(--win-text); }
+.bc-item:last-child { color: var(--win-text); font-weight: 600; }
+.bc-sep { color: #ccc; margin: 0 1px; font-size: 10px; }
+.search-box {
+    width: 220px; height: 28px; border: 1px solid var(--win-border);
+    border-radius: 4px; padding: 0 8px 0 28px; font-size: 12px;
+    background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E") 8px center no-repeat;
+    outline: none;
+}
+.search-box:focus { border-color: var(--win-accent); }
+
+/* ── MAIN LAYOUT ── */
+.main-layout {
+    display: flex; flex: 1; overflow: hidden;
+}
+
+/* ── NAV PANE (left) ── */
+.nav-pane {
+    width: 220px; min-width: 180px; max-width: 360px;
+    background: var(--win-sidebar);
+    border-right: 1px solid var(--win-border);
+    overflow-y: auto; flex-shrink: 0;
+    padding: 4px 0;
+}
+.nav-pane::-webkit-scrollbar { width: 8px; }
+.nav-pane::-webkit-scrollbar-thumb { background: #ccc; border-radius: 4px; }
+.tree-item {
+    display: flex; align-items: center; padding: 3px 8px; cursor: pointer;
+    font-size: 12px; white-space: nowrap; border-radius: 3px; margin: 0 4px;
+}
+.tree-item:hover { background: var(--win-hover); }
+.tree-item.active { background: var(--win-select); }
+.tree-toggle {
+    width: 16px; text-align: center; font-size: 8px; color: #999;
+    flex-shrink: 0; cursor: pointer;
+}
+.tree-toggle:hover { color: #333; }
+.tree-icon { margin-right: 5px; font-size: 14px; flex-shrink: 0; }
+.tree-label { overflow: hidden; text-overflow: ellipsis; }
+.tree-children { display: none; }
+.tree-children.open { display: block; }
+
+/* ── CONTENT PANE ── */
+.content-pane {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden;
+    background: var(--win-content);
+}
+
+/* Column headers (Details view) */
+.col-headers {
+    display: flex; align-items: center;
+    border-bottom: 1px solid var(--win-border);
+    background: var(--win-header-bg);
+    flex-shrink: 0; height: 28px; padding-right: 16px;
+}
+.col-h {
+    padding: 0 12px; font-size: 12px; color: var(--win-text-muted);
+    cursor: pointer; display: flex; align-items: center; gap: 4px;
+    height: 100%; border-right: 1px solid var(--win-border); flex-shrink: 0;
+}
+.col-h:hover { background: var(--win-hover); }
+.col-h-name { flex: 1; min-width: 200px; }
+.col-h-date { width: 160px; }
+.col-h-type { width: 120px; }
+.col-h-size { width: 100px; }
+.sort-arrow { font-size: 8px; }
+
+.file-list {
+    flex: 1; overflow-y: auto; overflow-x: hidden;
+    padding: 2px 0;
+}
+.file-list::-webkit-scrollbar { width: 8px; }
+.file-list::-webkit-scrollbar-thumb { background: #ccc; border-radius: 4px; }
+
+/* Details row */
+.file-row {
+    display: flex; align-items: center; padding: 2px 0; cursor: pointer;
+    height: 26px; padding-right: 16px;
+}
+.file-row:hover { background: var(--win-hover); }
+.file-row.selected { background: var(--win-select); outline: 1px solid var(--win-select-border); }
+.fr-name {
+    flex: 1; min-width: 200px; padding: 0 12px;
+    display: flex; align-items: center; gap: 6px;
+    overflow: hidden; white-space: nowrap;
+}
+.fr-name span { overflow: hidden; text-overflow: ellipsis; }
+.fr-date { width: 160px; padding: 0 12px; color: var(--win-text-muted); font-size: 12px; white-space: nowrap; }
+.fr-type { width: 120px; padding: 0 12px; color: var(--win-text-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fr-size { width: 100px; padding: 0 12px; color: var(--win-text-muted); font-size: 12px; text-align: right; white-space: nowrap; }
+
+.file-icon { font-size: 16px; flex-shrink: 0; line-height: 1; }
+
+/* Grid (Tiles) view */
+.file-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 4px; padding: 8px;
+    flex: 1; overflow-y: auto; align-content: start;
+}
+.grid-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; border-radius: 4px; cursor: pointer;
+    overflow: hidden;
+}
+.grid-item:hover { background: var(--win-hover); }
+.grid-item.selected { background: var(--win-select); outline: 1px solid var(--win-select-border); }
+.grid-icon { font-size: 32px; flex-shrink: 0; }
+.grid-info { overflow: hidden; }
+.grid-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.grid-meta { font-size: 11px; color: var(--win-text-muted); }
+
+/* Icons (Large Icons) view */
+.file-icons-view {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 90px);
+    gap: 4px; padding: 12px;
+    flex: 1; overflow-y: auto; align-content: start;
+}
+.icon-item {
+    display: flex; flex-direction: column; align-items: center;
+    padding: 8px 4px; border-radius: 4px; cursor: pointer;
+    text-align: center; width: 90px;
+}
+.icon-item:hover { background: var(--win-hover); }
+.icon-item.selected { background: var(--win-select); outline: 1px solid var(--win-select-border); }
+.icon-big { font-size: 40px; margin-bottom: 4px; }
+.icon-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 4px; margin-bottom: 4px; background: #eee; }
+.icon-label { font-size: 11px; word-break: break-all; line-height: 1.3; max-height: 2.6em; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* ── PREVIEW PANE (right) ── */
+.preview-pane {
+    width: 320px; min-width: 240px; max-width: 500px;
+    background: var(--preview-bg);
+    border-left: 1px solid var(--win-border);
+    display: flex; flex-direction: column;
+    overflow: hidden; flex-shrink: 0;
+}
+.preview-pane.hidden { display: none; }
+.preview-header {
+    padding: 16px; border-bottom: 1px solid var(--win-border);
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    flex-shrink: 0;
+}
+.preview-icon { font-size: 48px; }
+.preview-name { font-size: 13px; font-weight: 600; text-align: center; word-break: break-all; }
+.preview-content {
+    flex: 1; overflow: auto; display: flex;
+    flex-direction: column; align-items: center; justify-content: flex-start;
+}
+.preview-content img { max-width: 100%; max-height: 300px; object-fit: contain; }
+.preview-content video, .preview-content audio { max-width: 100%; }
+.preview-content pre {
+    width: 100%; padding: 12px; font-size: 11px;
+    font-family: 'Consolas', 'Fira Code', monospace;
+    white-space: pre-wrap; word-break: break-all;
+    background: #f5f5f5; line-height: 1.5; overflow: auto; flex: 1;
+}
+.preview-meta {
+    padding: 12px 16px; border-top: 1px solid var(--win-border);
+    font-size: 11px; color: var(--win-text-muted); flex-shrink: 0;
+}
+.preview-meta-row { display: flex; justify-content: space-between; padding: 3px 0; }
+.preview-actions {
+    padding: 10px 16px; border-top: 1px solid var(--win-border);
+    display: flex; gap: 6px; flex-shrink: 0;
+}
+.pv-btn {
+    flex: 1; padding: 6px; border: 1px solid var(--win-border); border-radius: 4px;
+    background: #fff; font-size: 12px; cursor: pointer; text-align: center;
+    text-decoration: none; color: var(--win-text);
+}
+.pv-btn:hover { background: var(--win-hover); }
+.pv-btn.primary { background: var(--win-accent); color: #fff; border-color: var(--win-accent); }
+.pv-btn.primary:hover { background: #106ebe; }
+.preview-empty {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    color: var(--win-text-muted); font-size: 12px; padding: 20px; text-align: center;
+}
+
+/* ── STATUS BAR ── */
+.status-bar {
+    height: 24px; background: var(--win-toolbar);
+    border-top: 1px solid var(--win-border);
+    display: flex; align-items: center; padding: 0 12px;
+    font-size: 11px; color: var(--win-text-muted);
+    flex-shrink: 0; gap: 16px;
+}
+
+/* ── FULLSCREEN MODAL ── */
+.fs-modal {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.9); z-index: 9999;
+    flex-direction: column; align-items: center; justify-content: center;
+}
+.fs-modal.open { display: flex; }
+.fs-close {
+    position: absolute; top: 16px; right: 24px;
+    color: #fff; font-size: 28px; cursor: pointer; z-index: 10000;
+    background: rgba(0,0,0,0.5); border: none; border-radius: 50%;
+    width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+}
+.fs-close:hover { background: rgba(255,255,255,0.2); }
+.fs-body { max-width: 95vw; max-height: 85vh; overflow: auto; display: flex; align-items: center; justify-content: center; }
+.fs-body img { max-width: 95vw; max-height: 85vh; object-fit: contain; }
+.fs-body video { max-width: 95vw; max-height: 85vh; }
+.fs-body pre {
+    color: #e0e0e0; background: #1e1e1e; padding: 24px;
+    border-radius: 8px; font-size: 13px; max-width: 900px; width: 90vw;
+    max-height: 80vh; overflow: auto; font-family: 'Consolas', monospace;
+    white-space: pre-wrap; word-break: break-all; line-height: 1.6;
+}
+.fs-nav {
+    display: flex; gap: 12px; margin-top: 16px; align-items: center; color: #fff;
+}
+.fs-nav-btn {
+    background: rgba(255,255,255,0.15); border: none; color: #fff;
+    padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 14px;
+}
+.fs-nav-btn:hover { background: rgba(255,255,255,0.3); }
+.fs-info { color: rgba(255,255,255,0.7); font-size: 12px; margin-top: 8px; }
+
+/* Resizer */
+.resizer {
+    width: 4px; cursor: col-resize; background: transparent; flex-shrink: 0;
+}
+.resizer:hover { background: var(--win-accent); }
+
+/* ── CONTEXT MENU ── */
+.ctx-menu {
+    position: fixed; background: #fff; border: 1px solid var(--win-border);
+    border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    min-width: 180px; padding: 4px 0; z-index: 9000; font-size: 13px;
+    display: none;
+}
+.ctx-menu.open { display: block; }
+.ctx-item {
+    padding: 6px 16px; cursor: pointer; display: flex; align-items: center; gap: 8px;
+}
+.ctx-item:hover { background: var(--win-hover); }
+.ctx-sep { height: 1px; background: var(--win-border); margin: 4px 0; }
+
+/* ── PROPERTIES MODAL ── */
+.prop-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4); z-index: 9500;
+    align-items: center; justify-content: center;
+}
+.prop-overlay.open { display: flex; }
+.prop-dialog {
+    background: #fff; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+    width: 380px; max-height: 80vh; overflow: auto;
+}
+.prop-header {
+    padding: 20px 24px 16px; border-bottom: 1px solid var(--win-border);
+    display: flex; align-items: center; gap: 12px;
+}
+.prop-header-icon { font-size: 36px; }
+.prop-header-name { font-size: 14px; font-weight: 600; word-break: break-all; }
+.prop-body { padding: 16px 24px; }
+.prop-row {
+    display: flex; padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 12px;
+}
+.prop-label { width: 90px; color: var(--win-text-muted); flex-shrink: 0; }
+.prop-value { flex: 1; word-break: break-all; }
+.prop-size-loading { color: var(--win-accent); }
+
+.prop-footer {
+    padding: 12px 24px; border-top: 1px solid var(--win-border);
+    display: flex; justify-content: flex-end;
+}
+.prop-close-btn {
+    padding: 6px 24px; border: 1px solid var(--win-border); border-radius: 4px;
+    background: #fff; font-size: 13px; cursor: pointer;
+}
+.prop-close-btn:hover { background: var(--win-hover); }
+
+/* Responsive */
+@media (max-width: 768px) {
+    .nav-pane { display: none; }
+    .preview-pane { display: none !important; }
+    .search-box { width: 140px; }
+    .col-h-date, .fr-date { display: none; }
+    .col-h-type, .fr-type { display: none; }
+}
+
+/* JSON syntax */
+.j-k { color: #a626a4; }
+.j-s { color: #50a14f; }
+.j-n { color: #986801; }
+.j-b { color: #4078f2; }
+</style>
+</head>
+<body>
+
+<!-- TOOLBAR -->
+<div class="toolbar">
+    <button class="tb-btn" onclick="navigateUp()" title="위로">⬆</button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" id="tbDetails" onclick="setView('details')" title="자세히">☰ 자세히</button>
+    <button class="tb-btn" id="tbTiles" onclick="setView('tiles')" title="타일">▦ 타일</button>
+    <button class="tb-btn" id="tbIcons" onclick="setView('icons')" title="큰 아이콘">▩ 아이콘</button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" id="tbPreview" onclick="togglePreview()" title="미리보기 창">👁 미리보기</button>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" onclick="openFullscreen()" id="tbOpen" title="열기" style="display:none;">🔲 열기</button>
+    <a class="tb-btn" id="tbDownload" href="#" style="display:none; text-decoration:none;" title="다운로드">⬇ 다운로드</a>
+    <div class="tb-sep"></div>
+    <button class="tb-btn" onclick="showMkdirDialog()">📁 새 폴더</button>
+    <button class="tb-btn" id="tbUpload" onclick="document.getElementById('uploadInput').click()">⬆ 업로드</button>
+    <input type="file" id="uploadInput" multiple style="display:none;" onchange="handleUpload(this)">
+    <button class="tb-btn" onclick="toggleHidden()">👁 숨김 파일</button>
+</div>
+
+<!-- ADDRESS BAR -->
+<div class="address-bar">
+    <div class="nav-buttons">
+        <button class="nav-btn" onclick="history.back()" title="뒤로">◀</button>
+        <button class="nav-btn" onclick="history.forward()" title="앞으로">▶</button>
+        <button class="nav-btn" onclick="navigateUp()" title="위로">⬆</button>
+    </div>
+    <div class="breadcrumb-bar" id="breadcrumbs">
+        {% for bc in breadcrumbs %}
+            {% if not loop.last %}
+                <a class="bc-item" href="/explorer/view?path={{ bc.path | urlencode }}">{{ bc.name }}</a>
+                <span class="bc-sep">›</span>
+            {% else %}
+                <span class="bc-item">{{ bc.name }}</span>
+            {% endif %}
+        {% endfor %}
+    </div>
+    <form action="/explorer/search" method="get" style="display:contents;">
+        <input type="text" name="q" class="search-box" placeholder="검색..." value="{{ query or '' }}">
+    </form>
+</div>
+
+<!-- MAIN -->
+<div class="main-layout">
+
+    <!-- NAV PANE -->
+    <div class="nav-pane" id="navPane">
+        <div id="navTree"></div>
+    </div>
+    <div class="resizer" id="navResizer"></div>
+
+    <!-- CONTENT -->
+    <div class="content-pane" id="contentPane">
+        <!-- Details column headers -->
+        <div class="col-headers" id="colHeaders">
+            <div class="col-h col-h-name" onclick="sortBy('name')">이름 <span class="sort-arrow" id="sort-name">▲</span></div>
+            <div class="col-h col-h-date" onclick="sortBy('date')">수정한 날짜 <span class="sort-arrow" id="sort-date"></span></div>
+            <div class="col-h col-h-type" onclick="sortBy('type')">유형 <span class="sort-arrow" id="sort-type"></span></div>
+            <div class="col-h col-h-size" onclick="sortBy('size')">크기 <span class="sort-arrow" id="sort-size"></span></div>
+        </div>
+
+        <!-- File list (details) -->
+        <div class="file-list" id="fileListDetails"></div>
+        <!-- Tiles view -->
+        <div class="file-grid" id="fileListTiles" style="display:none;"></div>
+        <!-- Icons view -->
+        <div class="file-icons-view" id="fileListIcons" style="display:none;"></div>
+    </div>
+
+    <div class="resizer" id="previewResizer"></div>
+
+    <!-- PREVIEW PANE -->
+    <div class="preview-pane hidden" id="previewPane">
+        <div id="previewContent">
+            <div class="preview-empty">파일을 선택하면 미리보기가 표시됩니다</div>
+        </div>
+    </div>
+</div>
+
+<!-- STATUS BAR -->
+<div class="status-bar">
+    <span id="statusCount"></span>
+    <span id="statusSelected"></span>
+</div>
+
+<!-- FULLSCREEN MODAL -->
+<div class="fs-modal" id="fsModal">
+    <button class="fs-close" onclick="closeFullscreen()">✕</button>
+    <div class="fs-body" id="fsBody"></div>
+    <div class="fs-nav" id="fsNav" style="display:none;">
+        <button class="fs-nav-btn" onclick="fsPrev()">◀ 이전</button>
+        <span id="fsIndex">0 / 0</span>
+        <button class="fs-nav-btn" onclick="fsNext()">다음 ▶</button>
+        <button class="fs-nav-btn" id="fsAutoBtn" onclick="fsToggleAuto()">▶ 자동</button>
+    </div>
+    <div class="fs-info" id="fsInfo"></div>
+</div>
+
+<!-- CONTEXT MENU -->
+<div class="ctx-menu" id="ctxMenu">
+    <div class="ctx-item" onclick="ctxOpen()">📂 열기</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" id="ctxDownloadItem" onclick="ctxDownload()">⬇ 다운로드</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" onclick="ctxRename()">✏️ 이름 바꾸기</div>
+    <div class="ctx-item" onclick="ctxCut()">✂️ 잘라내기</div>
+    <div class="ctx-item" onclick="ctxCopyItem()">📋 복사</div>
+    <div class="ctx-item" id="ctxPasteItem" onclick="ctxPaste()">📌 붙여넣기</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" id="ctxExtractItem" onclick="ctxExtract()">📦 압축 해제</div>
+    <div class="ctx-item" onclick="ctxCompress()">🗜️ 압축</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" onclick="ctxCopyPath()">🔗 경로 복사</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" style="color:#c00;" onclick="ctxDelete()">🗑️ 삭제</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item" onclick="ctxProperties()">ℹ️ 속성</div>
+</div>
+
+<!-- PROPERTIES MODAL -->
+<div class="prop-overlay" id="propOverlay" onclick="if(event.target===this)closeProp()">
+    <div class="prop-dialog">
+        <div class="prop-header">
+            <span class="prop-header-icon" id="propIcon"></span>
+            <span class="prop-header-name" id="propName"></span>
+        </div>
+        <div class="prop-body" id="propBody"></div>
+        <div class="prop-footer">
+            <button class="prop-close-btn" onclick="closeProp()">확인</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// ── DATA ──
+const ROOT = {{ root_path | tojson }};
+const CURRENT = {{ current_path | tojson }};
+const PARENT = {{ parent_path | tojson }};
+const MODE = {{ mode | tojson }};
+const TOTAL = {{ total }};
+const PAGE = {{ page }};
+const PAGE_SIZE = {{ page_size }};
+const TOTAL_PAGES = {{ total_pages }};
+
+let items = [
+    {% for item in items %}
+    {
+        name: {{ item.name | tojson }},
+        path: {{ item.path | tojson }},
+        is_dir: {{ 'true' if item.is_dir else 'false' }},
+        type: {{ item.type | tojson }},
+        size: {{ item.size | tojson }},
+        size_raw: {{ item.size_raw }},
+        ext: {{ item.ext | tojson }},
+        mtime: {{ item.mtime }},
+    },
+    {% endfor %}
+];
+
+let currentView = localStorage.getItem('exp_view') || 'details';
+let previewVisible = localStorage.getItem('exp_preview') === '1';
+let selectedPath = null;
+let sortKey = 'name';
+let sortAsc = true;
+
+// ── ICONS ──
+function fileIcon(item) {
+    if (item.is_dir) return '📁';
+    const m = {
+        image:'🖼️', video:'🎬', audio:'🎵', document:'📕',
+        text:'📄', archive:'📦', spreadsheet:'📊',
+        presentation:'📽️', word:'📝',
+    };
+    return m[item.type] || '📃';
+}
+
+function typeLabel(item) {
+    if (item.is_dir) return '파일 폴더';
+    const m = {
+        image:'이미지', video:'동영상', audio:'오디오',
+        document:'문서', text:'텍스트', archive:'압축',
+        spreadsheet:'스프레드시트', presentation:'프레젠테이션', word:'문서',
+    };
+    if (item.ext) return (m[item.type] || '파일') + ' (' + item.ext + ')';
+    return m[item.type] || '파일';
+}
+
+function fmtDate(ts) {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    return d.toLocaleDateString('ko-KR') + ' ' + d.toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit'});
+}
+
+// ── SORT ──
+function sortBy(key) {
+    // 클라이언트 정렬 → 서버 정렬로 전환 시
+    const url = new URL(location.href);
+    url.searchParams.set('sort', key);
+    url.searchParams.set('order', url.searchParams.get('sort') === key && url.searchParams.get('order') === 'asc' ? 'desc' : 'asc');
+    url.searchParams.set('page', 1);
+    location.href = url.toString();
+}
+
+function sortedItems() {
+    return [...items].sort((a, b) => {
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+        let va, vb;
+        switch (sortKey) {
+            case 'name': va = a.name.toLowerCase(); vb = b.name.toLowerCase(); break;
+            case 'date': va = a.mtime; vb = b.mtime; break;
+            case 'type': va = typeLabel(a); vb = typeLabel(b); break;
+            case 'size': va = a.size_raw; vb = b.size_raw; break;
+            default: va = a.name; vb = b.name;
+        }
+        let cmp = va < vb ? -1 : va > vb ? 1 : 0;
+        return sortAsc ? cmp : -cmp;
+    });
+}
+
+// ── RENDER ──
+function renderFiles() {
+    const sorted = sortedItems();
+    renderDetails(sorted);
+    renderTiles(sorted);
+    renderIcons(sorted);
+    updateStatus();
+    renderPagination();
+}
+
+function renderDetails(list) {
+    const el = document.getElementById('fileListDetails');
+    el.innerHTML = list.map(item => `
+        <div class="file-row${selectedPath === item.path ? ' selected' : ''}"
+             data-path="${esc(item.path)}"
+             onclick="selectItem(event, '${esc(item.path)}')"
+             ondblclick="openItem('${esc(item.path)}', ${item.is_dir})">
+            <div class="fr-name"><span class="file-icon">${fileIcon(item)}</span><span title="${esc(item.name)}">${esc(item.name)}</span></div>
+            <div class="fr-date">${fmtDate(item.mtime)}</div>
+            <div class="fr-type">${typeLabel(item)}</div>
+            <div class="fr-size">${item.is_dir ? '' : item.size}</div>
+        </div>
+    `).join('');
+}
+
+function renderTiles(list) {
+    const el = document.getElementById('fileListTiles');
+    el.innerHTML = list.map(item => `
+        <div class="grid-item${selectedPath === item.path ? ' selected' : ''}"
+             data-path="${esc(item.path)}"
+             onclick="selectItem(event, '${esc(item.path)}')"
+             ondblclick="openItem('${esc(item.path)}', ${item.is_dir})">
+            <span class="grid-icon">${fileIcon(item)}</span>
+            <div class="grid-info">
+                <span class="grid-name" title="${esc(item.name)}">${esc(item.name)}</span>
+                <span class="grid-meta">${item.is_dir ? '폴더' : item.size}</span>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderIcons(list) {
+    const el = document.getElementById('fileListIcons');
+    el.innerHTML = list.map(item => {
+        const isImg = item.type === 'image';
+        const iconHtml = isImg
+            ? `<img class="icon-thumb" src="${rawUrl(item.path)}" loading="lazy" onerror="this.outerHTML='<span class=icon-big>🖼️</span>'">`
+            : `<span class="icon-big">${fileIcon(item)}</span>`;
+        return `
+        <div class="icon-item${selectedPath === item.path ? ' selected' : ''}"
+             data-path="${esc(item.path)}"
+             onclick="selectItem(event, '${esc(item.path)}')"
+             ondblclick="openItem('${esc(item.path)}', ${item.is_dir})">
+            ${iconHtml}
+            <span class="icon-label" title="${esc(item.name)}">${esc(item.name)}</span>
+        </div>`;
+    }).join('');
+}
+
+function esc(s) { return s.replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+
+// ── VIEW MODE ──
+function setView(mode) {
+    currentView = mode;
+    localStorage.setItem('exp_view', mode);
+    document.getElementById('colHeaders').style.display = mode === 'details' ? 'flex' : 'none';
+    document.getElementById('fileListDetails').style.display = mode === 'details' ? '' : 'none';
+    document.getElementById('fileListTiles').style.display = mode === 'tiles' ? '' : 'none';
+    document.getElementById('fileListIcons').style.display = mode === 'icons' ? '' : 'none';
+    document.querySelectorAll('.tb-btn').forEach(b => b.classList.remove('active'));
+    const m = {details:'tbDetails', tiles:'tbTiles', icons:'tbIcons'};
+    document.getElementById(m[mode])?.classList.add('active');
+}
+
+// ── PREVIEW ──
+function togglePreview() {
+    previewVisible = !previewVisible;
+    localStorage.setItem('exp_preview', previewVisible ? '1' : '0');
+    document.getElementById('previewPane').classList.toggle('hidden', !previewVisible);
+    document.getElementById('tbPreview').classList.toggle('active', previewVisible);
+    document.getElementById('previewResizer').style.display = previewVisible ? '' : 'none';
+}
+
+function selectItem(e, path) {
+    e.stopPropagation();
+    selectedPath = path;
+    renderFiles();
+    loadPreview(path);
+    const item = items.find(i => i.path === path);
+    if (item && !item.is_dir) {
+        document.getElementById('tbOpen').style.display = '';
+        document.getElementById('tbDownload').style.display = '';
+        document.getElementById('tbDownload').href = '/explorer/download_file?path=' + encodeURIComponent(path);
+    } else {
+        document.getElementById('tbOpen').style.display = 'none';
+        document.getElementById('tbDownload').style.display = 'none';
+    }
+    document.getElementById('statusSelected').textContent = '선택: ' + path.split('/').pop();
+}
+
+function openItem(path, isDir) {
+    if (isDir) {
+        location.href = '/explorer/view?path=' + encodeURIComponent(path);
+    } else {
+        openFullscreen();
+    }
+}
+
+// ── PAGINATION ──
+function renderPagination() {
+    // 이미 있으면 제거 후 재생성
+    document.getElementById('paginationBar')?.remove();
+
+    if (TOTAL_PAGES <= 1) return;
+
+    const bar = document.createElement('div');
+    bar.id = 'paginationBar';
+    bar.style.cssText = `
+        display:flex; align-items:center; justify-content:center;
+        gap:4px; padding:8px 12px; border-top:1px solid var(--win-border);
+        background:var(--win-toolbar); flex-shrink:0; font-size:12px;
+    `;
+
+    const makeBtn = (label, targetPage, disabled = false, active = false) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.disabled = disabled;
+        btn.style.cssText = `
+            padding:3px 10px; border-radius:4px; cursor:pointer; font-size:12px;
+            border:1px solid var(--win-border);
+            background:${active ? 'var(--win-accent)' : '#fff'};
+            color:${active ? '#fff' : 'var(--win-text)'};
+        `;
+        if (!disabled) {
+            btn.onclick = () => goToPage(targetPage);
+        }
+        return btn;
+    };
+
+    bar.appendChild(makeBtn('◀', PAGE - 1, PAGE <= 1));
+
+    // 앞뒤 2페이지 + 첫/끝 페이지 표시
+    const pages = new Set([1, TOTAL_PAGES, PAGE - 1, PAGE, PAGE + 1].filter(p => p >= 1 && p <= TOTAL_PAGES));
+    let prev = null;
+    for (const p of [...pages].sort((a, b) => a - b)) {
+        if (prev && p - prev > 1) {
+            const dots = document.createElement('span');
+            dots.textContent = '…';
+            dots.style.padding = '0 4px';
+            bar.appendChild(dots);
+        }
+        bar.appendChild(makeBtn(String(p), p, false, p === PAGE));
+        prev = p;
+    }
+
+    bar.appendChild(makeBtn('▶', PAGE + 1, PAGE >= TOTAL_PAGES));
+
+    // 총 개수 표시
+    const info = document.createElement('span');
+    info.style.cssText = 'margin-left:12px; color:var(--win-text-muted);';
+    info.textContent = `전체 ${TOTAL.toLocaleString()}개`;
+    bar.appendChild(info);
+
+    // content-pane 하단에 삽입 (status-bar 위)
+    document.getElementById('contentPane').appendChild(bar);
+}
+
+function goToPage(page) {
+    const url = new URL(location.href);
+    url.searchParams.set('page', page);
+    location.href = url.toString();
+}
+
+async function loadPreview(path) {
+    const pane = document.getElementById('previewPane');
+    const content = document.getElementById('previewContent');
+    const item = items.find(i => i.path === path);
+    if (!item) return;
+
+    if (item.is_dir) {
+        content.innerHTML = `
+            <div class="preview-header"><span class="preview-icon">📁</span>
+            <span class="preview-name">${esc(item.name)}</span></div>
+            <div class="preview-meta">
+                <div class="preview-meta-row"><span>유형</span><span>파일 폴더</span></div>
+                <div class="preview-meta-row"><span>항목</span><span>${item.child_count ?? ''}개</span></div>
+            </div>`;
+        return;
+    }
+
+    const serveUrl = '/explorer/serve_file?path=' + encodeURIComponent(path);
+    const mediaUrl = rawUrl(path);
+    const dlUrl = '/explorer/download_file?path=' + encodeURIComponent(path);
+
+    let previewHtml = '';
+    if (item.type === 'image') {
+        previewHtml = `<div class="preview-content"><img src="${mediaUrl}" onerror="this.outerHTML='미리보기 불가'"></div>`;
+    } else if (item.type === 'video') {
+        if (isBrowserPlayable(item.ext)) {
+            previewHtml = `<div class="preview-content"><video id="pv-video" controls style="max-width:100%;max-height:300px;"></video><div id="pv-video-loading" style="color:var(--win-text-muted);font-size:12px;padding:8px;">준비 중...</div></div>`;
+        } else {
+            previewHtml = `<div class="preview-empty">${item.ext} 형식은 브라우저 재생 불가<br>다운로드 후 재생해주세요</div>`;
+        }
+    } else if (item.type === 'audio') {
+        previewHtml = `<div class="preview-content" style="padding:24px;"><audio id="pv-audio" controls style="width:100%;"></audio><div id="pv-audio-loading" style="color:var(--win-text-muted);font-size:12px;">준비 중...</div></div>`;
+    } else if (item.type === 'text') {
+        try {
+            const res = await fetch('/explorer/api/file_info?path=' + encodeURIComponent(path));
+            const info = await res.json();
+            if (info.content != null) {
+                let display = info.content;
+                if (item.ext === '.json') {
+                    try { display = syntaxHL(JSON.stringify(JSON.parse(display), null, 2)); }
+                    catch { display = escHtml(display); }
+                } else {
+                    display = escHtml(display);
+                }
+                previewHtml = `<div class="preview-content"><pre>${display}</pre></div>`;
+            } else {
+                previewHtml = `<div class="preview-empty">미리보기 불가</div>`;
+            }
+        } catch {
+            previewHtml = `<div class="preview-empty">불러오기 실패</div>`;
+        }
+    } else if (item.type === 'document' && item.ext === '.pdf') {
+        previewHtml = `<div class="preview-content"><iframe src="${mediaUrl}" style="width:100%;height:100%;border:none;flex:1;"></iframe></div>`;
+    } else {
+        previewHtml = `<div class="preview-empty">${item.ext || ''} 파일은 미리보기를 지원하지 않습니다</div>`;
+    }
+
+    content.innerHTML = `
+        <div class="preview-header">
+            <span class="preview-icon">${fileIcon(item)}</span>
+            <span class="preview-name">${esc(item.name)}</span>
+        </div>
+        ${previewHtml}
+        <div class="preview-meta">
+            <div class="preview-meta-row"><span>유형</span><span>${typeLabel(item)}</span></div>
+            <div class="preview-meta-row"><span>크기</span><span>${item.size}</span></div>
+            <div class="preview-meta-row"><span>수정</span><span>${fmtDate(item.mtime)}</span></div>
+        </div>
+        <div class="preview-actions">
+            <button class="pv-btn" onclick="openFullscreen()">열기</button>
+            <a class="pv-btn primary" href="${dlUrl}">다운로드</a>
+        </div>`;
+
+    if (item.type === 'video' && isBrowserPlayable(item.ext)) {
+        loadVideoBlob(mediaUrl, 'pv-video', 'pv-video-loading');
+    } else if (item.type === 'audio') {
+        loadVideoBlob(mediaUrl, 'pv-audio', 'pv-audio-loading');
+    }
+}
+
+// ── NAV TREE ──
+async function buildNavTree() {
+    const tree = document.getElementById('navTree');
+    tree.innerHTML = '';
+    const root = createTreeNode({name:'Root', path:ROOT, is_dir:true}, 0);
+    tree.appendChild(root);
+
+    const rel = CURRENT.startsWith(ROOT) ? CURRENT.slice(ROOT.length) : '';
+    if (rel) {
+        const parts = rel.split('/').filter(Boolean);
+        let cur = ROOT;
+        for (const p of parts) {
+            cur += '/' + p;
+            await expandTreeNode(cur);
+        }
+    } else {
+        await expandTreeNode(ROOT);
+    }
+    highlightTreeNode(CURRENT);
+}
+
+function createTreeNode(item, depth) {
+    const div = document.createElement('div');
+    div.dataset.path = item.path;
+
+    const row = document.createElement('div');
+    row.className = 'tree-item';
+    row.style.paddingLeft = (8 + depth * 16) + 'px';
+    row.dataset.path = item.path;
+
+    const toggle = document.createElement('span');
+    toggle.className = 'tree-toggle';
+    toggle.textContent = '▶';
+    toggle.onclick = (e) => { e.stopPropagation(); toggleTreeExpand(item.path, div, depth); };
+
+    const icon = document.createElement('span');
+    icon.className = 'tree-icon';
+    icon.textContent = '📁';
+
+    const label = document.createElement('span');
+    label.className = 'tree-label';
+    label.textContent = item.name;
+
+    row.appendChild(toggle);
+    row.appendChild(icon);
+    row.appendChild(label);
+    row.onclick = () => { location.href = '/explorer/view?path=' + encodeURIComponent(item.path); };
+
+    const children = document.createElement('div');
+    children.className = 'tree-children';
+    children.dataset.parentPath = item.path;
+
+    div.appendChild(row);
+    div.appendChild(children);
+    return div;
+}
+
+async function toggleTreeExpand(path, container, depth) {
+    const children = container.querySelector('.tree-children');
+    const toggle = container.querySelector('.tree-toggle');
+    if (children.classList.contains('open')) {
+        children.classList.remove('open');
+        toggle.textContent = '▶';
+        return;
+    }
+    await loadChildren(path, children, depth);
+    children.classList.add('open');
+    toggle.textContent = '▼';
+}
+
+async function expandTreeNode(path) {
+    const container = document.querySelector(`[data-path="${CSS.escape(path)}"]`);
+    if (!container) return;
+    const children = container.querySelector('.tree-children');
+    const toggle = container.querySelector('.tree-toggle');
+    if (!children || children.classList.contains('open')) return;
+    const depth = Math.round((parseInt(container.querySelector('.tree-item')?.style.paddingLeft) - 8) / 16);
+    await loadChildren(path, children, depth);
+    children.classList.add('open');
+    if (toggle) toggle.textContent = '▼';
+}
+
+async function loadChildren(path, childrenEl, depth) {
+    if (childrenEl.children.length > 0) return;
+    try {
+        const res = await fetch('/explorer/api/list?path=' + encodeURIComponent(path));
+        const data = await res.json();
+        const dirs = data.items.filter(i => i.is_dir);
+        dirs.forEach(d => {
+            childrenEl.appendChild(createTreeNode(d, depth + 1));
+        });
+        if (dirs.length === 0) {
+            const toggle = childrenEl.parentElement.querySelector('.tree-toggle');
+            if (toggle) toggle.style.visibility = 'hidden';
+        }
+    } catch {}
+}
+
+function highlightTreeNode(path) {
+    document.querySelectorAll('.tree-item').forEach(el => el.classList.remove('active'));
+    const target = document.querySelector(`.tree-item[data-path="${CSS.escape(path)}"]`);
+    if (target) { target.classList.add('active'); target.scrollIntoView({block:'nearest'}); }
+}
+
+// ── FULLSCREEN ──
+let fsItems = [];
+let fsIndex = 0;
+let fsAutoInterval = null;
+
+function openFullscreen() {
+    if (!selectedPath) return;
+    const item = items.find(i => i.path === selectedPath);
+    if (!item || item.is_dir) return;
+
+    fsItems = items.filter(i => !i.is_dir);
+    fsIndex = fsItems.findIndex(i => i.path === selectedPath);
+    if (fsIndex < 0) fsIndex = 0;
+
+    renderFullscreen();
+    document.getElementById('fsModal').classList.add('open');
+    document.body.style.overflow = 'hidden';
+
+    const nav = document.getElementById('fsNav');
+    nav.style.display = fsItems.length > 1 ? 'flex' : 'none';
+}
+
+function renderFullscreen() {
+    const item = fsItems[fsIndex];
+    const body = document.getElementById('fsBody');
+    const url = rawUrl(item.path);
+
+    if (item.type === 'image') {
+        body.innerHTML = `<img src="${url}">`;
+    } else if (item.type === 'video') {
+        if (isBrowserPlayable(item.ext)) {
+            body.innerHTML = `<video id="fs-video" controls autoplay style="max-width:95vw;max-height:85vh;"></video>
+                <div id="fs-video-loading" style="color:#aaa;font-size:14px;margin-top:8px;">영상 로딩 중...</div>`;
+            loadVideoBlob(url, 'fs-video', 'fs-video-loading');
+        } else {
+            body.innerHTML = `<div style="color:#fff;text-align:center;padding:40px;">
+                <p style="font-size:1.1rem;margin-bottom:8px;">🎬 ${escHtml(item.name)}</p>
+                <p style="color:#999;margin-bottom:20px;">${item.ext} 형식은 브라우저에서 재생할 수 없습니다.<br>다운로드 후 VLC 등으로 재생해주세요.</p>
+                <a href="/explorer/download_file?path=${encodeURIComponent(item.path)}" 
+                   style="color:#fff;background:var(--win-accent);padding:10px 24px;border-radius:6px;text-decoration:none;">다운로드</a>
+            </div>`;
+        }
+    } else if (item.type === 'audio') {
+        body.innerHTML = `<audio id="fs-audio" controls autoplay style="min-width:300px;"></audio>
+            <div id="fs-audio-loading" style="color:#aaa;font-size:14px;margin-top:8px;">오디오 로딩 중...</div>`;
+        loadVideoBlob(url, 'fs-audio', 'fs-audio-loading');
+    } else if (item.type === 'document' && item.ext === '.pdf') {
+        body.innerHTML = `<iframe src="${url}" style="width:90vw;height:85vh;border:none;border-radius:8px;"></iframe>`;
+    } else if (item.type === 'text') {
+        fetch(url).then(r => r.text()).then(text => {
+            let display;
+            if (item.ext === '.json') {
+                try { display = syntaxHL(JSON.stringify(JSON.parse(text), null, 2)); }
+                catch { display = escHtml(text); }
+            } else { display = escHtml(text); }
+            body.innerHTML = `<pre>${display}</pre>`;
+        }).catch(() => { body.innerHTML = '<pre>불러오기 실패</pre>'; });
+    } else {
+        body.innerHTML = `<div style="color:#fff;text-align:center;padding:40px;">
+            <p style="margin-bottom:16px;">미리보기를 지원하지 않는 파일입니다</p>
+            <a href="/explorer/download_file?path=${encodeURIComponent(item.path)}" 
+               style="color:#fff;background:var(--win-accent);padding:10px 24px;border-radius:6px;text-decoration:none;">다운로드</a>
+        </div>`;
+    }
+
+    document.getElementById('fsIndex').textContent = `${fsIndex + 1} / ${fsItems.length}`;
+    document.getElementById('fsInfo').textContent = item.name;
+}
+
+function closeFullscreen() {
+    const vid = document.getElementById('fs-video');
+    const aud = document.getElementById('fs-audio');
+    if (vid?.src?.startsWith('blob:')) URL.revokeObjectURL(vid.src);
+    if (aud?.src?.startsWith('blob:')) URL.revokeObjectURL(aud.src);
+    document.getElementById('fsModal').classList.remove('open');
+    document.body.style.overflow = '';
+    fsStopAuto();
+}
+function fsNext() { fsIndex = (fsIndex + 1) % fsItems.length; renderFullscreen(); }
+function fsPrev() { fsIndex = (fsIndex - 1 + fsItems.length) % fsItems.length; renderFullscreen(); }
+function fsToggleAuto() {
+    const btn = document.getElementById('fsAutoBtn');
+    if (fsAutoInterval) { fsStopAuto(); }
+    else { fsAutoInterval = setInterval(fsNext, 300); btn.textContent = '⏸ 정지'; }
+}
+function fsStopAuto() {
+    clearInterval(fsAutoInterval); fsAutoInterval = null;
+    document.getElementById('fsAutoBtn').textContent = '▶ 자동';
+}
+
+// ── NAVIGATE ──
+function navigateUp() {
+    if (PARENT) location.href = '/explorer/view?path=' + encodeURIComponent(PARENT);
+}
+
+// ── STATUS ──
+function updateStatus() {
+    const dirs = items.filter(i => i.is_dir).length;
+    const files = items.filter(i => !i.is_dir).length;
+    const parts = [];
+    if (dirs) parts.push(dirs + '개 폴더');
+    if (files) parts.push(files + '개 파일');
+    document.getElementById('statusCount').textContent = parts.join(', ') || '비어 있음';
+}
+
+// ── RESIZER ──
+function initResizer(resizerId, targetId, side) {
+    const resizer = document.getElementById(resizerId);
+    const target = document.getElementById(targetId);
+    if (!resizer || !target) return;
+    let startX, startW;
+    resizer.addEventListener('mousedown', (e) => {
+        startX = e.clientX;
+        startW = target.offsetWidth;
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        e.preventDefault();
+    });
+    function onMove(e) {
+        const diff = side === 'left' ? e.clientX - startX : startX - e.clientX;
+        target.style.width = Math.max(150, startW + diff) + 'px';
+    }
+    function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+    }
+}
+
+// ── UTILS ──
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function rawUrl(path) {
+    return '/explorer/serve_file?path=' + encodeURIComponent(path);
+}
+function videoMime(ext) {
+    const m = {'.mp4':'video/mp4','.webm':'video/webm','.ogg':'video/ogg','.mov':'video/mp4',
+               '.mp3':'audio/mpeg','.wav':'audio/wav','.flac':'audio/flac','.m4a':'audio/mp4','.aac':'audio/aac'};
+    return m[ext] || 'video/mp4';
+}
+function isBrowserPlayable(ext) {
+    return ['.mp4','.webm','.ogg','.mov'].includes(ext);
+}
+
+async function loadVideoBlob(url, elementId, loadingId) {
+    const loading = document.getElementById(loadingId);
+    try {
+        if (loading) loading.textContent = '다운로드 중...';
+        const res = await fetch(url, { cache: 'no-store', headers: { 'Accept': '*/*' } });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const contentLength = res.headers.get('content-length');
+        if (loading) loading.textContent = '버퍼링 중... (' + (contentLength || '?') + ' bytes)';
+        const arrayBuffer = await res.arrayBuffer();
+        const mime = res.headers.get('content-type') || 'video/mp4';
+        const blob = new Blob([arrayBuffer], { type: mime });
+        if (loading) loading.textContent = blob.size + ' bytes 로드 완료';
+        const blobUrl = URL.createObjectURL(blob);
+        const el = document.getElementById(elementId);
+        if (!el) { if (loading) loading.textContent = '요소를 찾을 수 없음'; return; }
+        el.src = blobUrl;
+        el.onerror = () => { if (loading) loading.textContent = '재생 실패 (blob ' + blob.size + ' bytes / type: ' + mime + ')'; };
+        el.onloadeddata = () => { if (loading) loading.remove(); };
+    } catch (e) {
+        if (loading) loading.textContent = '실패: ' + e.message;
+    }
+}
+
+function syntaxHL(json) {
+    json = escHtml(json);
+    return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, m => {
+        let c = 'j-n';
+        if (/^"/.test(m)) c = /:$/.test(m) ? 'j-k' : 'j-s';
+        else if (/true|false/.test(m)) c = 'j-b';
+        return '<span class="' + c + '">' + m + '</span>';
+    });
+}
+
+// ── CONTEXT MENU ──
+let ctxTargetPath = null;
+
+document.addEventListener('contextmenu', (e) => {
+    const row = e.target.closest('.file-row, .grid-item, .icon-item, .tree-item');
+    if (!row) { hideCtx(); return; }
+    e.preventDefault();
+    hideCtx();
+
+    const path = row.dataset?.path;
+    if (!path) { hideCtx(); return; }
+
+    ctxTargetPath = path;
+    const item = items.find(i => i.path === path);
+
+    document.getElementById('ctxDownloadItem').style.display = (item && item.is_dir) ? 'none' : '';
+    document.getElementById('ctxDownloadItem').previousElementSibling.style.display = (item && item.is_dir) ? 'none' : '';
+
+    const menu = document.getElementById('ctxMenu');
+    
+    // 일단 보이지 않게 표시해서 실제 크기 측정
+    menu.style.visibility = 'hidden';
+    menu.style.display = 'block';
+    menu.classList.add('open');
+
+    const mw = menu.offsetWidth;
+    const mh = menu.offsetHeight;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    let x = e.clientX;
+    let y = e.clientY;
+
+    // 오른쪽 넘침 → 왼쪽으로
+    if (x + mw > vw) x = vw - mw - 4;
+    // 아래쪽 넘침 → 위쪽으로
+    if (y + mh > vh) y = y - mh;
+    // 위쪽도 넘치면 (메뉴가 너무 클 때) 강제 고정
+    if (y < 0) y = 4;
+
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    menu.style.visibility = 'visible';
+});
+
+document.addEventListener('mousedown', (e) => {
+    if (e.button === 2) return; // 우클릭은 무시
+    if (!e.target.closest('#ctxMenu')) hideCtx();
+});
+function hideCtx() {
+    const menu = document.getElementById('ctxMenu');
+    menu.classList.remove('open');
+    menu.style.display = '';        // ← 추가
+    menu.style.visibility = '';     // ← 추가
+}
+function ctxOpen() {
+    hideCtx();
+    if (!ctxTargetPath) return;
+    const item = items.find(i => i.path === ctxTargetPath);
+    if (item) openItem(item.path, item.is_dir);
+    else location.href = '/explorer/view?path=' + encodeURIComponent(ctxTargetPath);
+}
+
+function ctxDownload() {
+    hideCtx();
+    if (!ctxTargetPath) return;
+    window.location.href = '/explorer/download_file?path=' + encodeURIComponent(ctxTargetPath);
+}
+
+function ctxProperties() {
+    hideCtx();
+    if (!ctxTargetPath) return;
+    showProperties(ctxTargetPath);
+}
+
+function ctxCopyPath() {
+    hideCtx();
+    if (!ctxTargetPath) return;
+    navigator.clipboard.writeText(ctxTargetPath).then(() => {
+        const bar = document.getElementById('statusSelected');
+        const prev = bar.textContent;
+        bar.textContent = '📋 경로 복사됨: ' + ctxTargetPath;
+        setTimeout(() => { bar.textContent = prev; }, 2000);
+    }).catch(() => {
+        prompt('경로를 복사하세요:', ctxTargetPath);
+    });
+}
+
+// ── PROPERTIES MODAL ──
+async function showProperties(path) {
+    const item = items.find(i => i.path === path);
+    const overlay = document.getElementById('propOverlay');
+    const iconEl = document.getElementById('propIcon');
+    const nameEl = document.getElementById('propName');
+    const body = document.getElementById('propBody');
+
+    const isDir = item ? item.is_dir : true;
+    const displayName = item ? item.name : path.split('/').pop();
+    const displayIcon = item ? fileIcon(item) : '📁';
+
+    iconEl.textContent = displayIcon;
+    nameEl.textContent = displayName;
+
+    let rows = '';
+    rows += propRow('위치', escHtml(path.substring(0, path.lastIndexOf('/'))));
+
+    if (isDir) {
+        rows += propRow('유형', '파일 폴더');
+        if (item && item.mtime) rows += propRow('수정 날짜', fmtDate(item.mtime));
+        rows += propRow('크기', '<span class="prop-size-loading" id="propSizeVal">⏳ 계산 중...</span>');
+        if (item && item.child_count != null) rows += propRow('포함 항목', item.child_count + '개');
+    } else {
+        rows += propRow('유형', typeLabel(item));
+        rows += propRow('크기', item.size + ' (' + item.size_raw.toLocaleString() + ' bytes)');
+        rows += propRow('수정 날짜', fmtDate(item.mtime));
+        if (item.ext) rows += propRow('확장자', item.ext);
+    }
+
+    body.innerHTML = rows;
+    overlay.classList.add('open');
+
+    // 디렉토리면 비동기로 크기 계산
+    if (isDir) {
+        try {
+            const res = await fetch('/explorer/api/dir_size?path=' + encodeURIComponent(path));
+            const data = await res.json();
+            const el = document.getElementById('propSizeVal');
+            if (el) el.outerHTML = data.size + ' (' + data.size_raw.toLocaleString() + ' bytes)';
+        } catch {
+            const el = document.getElementById('propSizeVal');
+            if (el) el.outerHTML = '계산 실패';
+        }
+    }
+}
+
+function propRow(label, value) {
+    return `<div class="prop-row"><span class="prop-label">${label}</span><span class="prop-value">${value}</span></div>`;
+}
+
+function closeProp() {
+    document.getElementById('propOverlay').classList.remove('open');
+}
+
+// ── KEYBOARD ──
+document.addEventListener('keydown', (e) => {
+    // 속성 모달 닫기
+    if (e.key === 'Escape' && document.getElementById('propOverlay').classList.contains('open')) {
+        closeProp();
+        return;
+    }
+    // 컨텍스트 메뉴 닫기
+    if (e.key === 'Escape') {
+        hideCtx();
+    }
+
+    const modal = document.getElementById('fsModal');
+    if (modal.classList.contains('open')) {
+        if (e.key === 'Escape') closeFullscreen();
+        if (e.key === 'ArrowRight') fsNext();
+        if (e.key === 'ArrowLeft') fsPrev();
+        if (e.key === ' ') { e.preventDefault(); fsToggleAuto(); }
+        return;
+    }
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === 'Backspace') { e.preventDefault(); navigateUp(); }
+    if (e.key === 'Enter' && selectedPath) {
+        const item = items.find(i => i.path === selectedPath);
+        if (item) openItem(item.path, item.is_dir);
+    }
+});
+
+// ── 클립보드 ──
+let clipboard = null; // {action:'cut'|'copy', paths:[...]}
+
+function ctxCut() {
+    hideCtx();
+    clipboard = { action: 'cut', paths: getSelectedPaths() };
+    showStatus('✂️ 잘라내기: ' + clipboard.paths.length + '개');
+}
+function ctxCopyItem() {
+    hideCtx();
+    clipboard = { action: 'copy', paths: getSelectedPaths() };
+    showStatus('📋 복사: ' + clipboard.paths.length + '개');
+}
+async function ctxPaste() {
+    hideCtx();
+    if (!clipboard) return;
+    for (const src of clipboard.paths) {
+        const endpoint = clipboard.action === 'cut' ? '/explorer/api/move' : '/explorer/api/copy';
+        await apiFetch(endpoint, { src, dst_dir: CURRENT });
+    }
+    if (clipboard.action === 'cut') clipboard = null;
+    location.reload();
+}
+
+// ── 삭제 ──
+async function ctxDelete() {
+    hideCtx();
+    const paths = getSelectedPaths();
+    if (!paths.length) return;
+    if (!confirm(`${paths.length}개 항목을 삭제하시겠습니까?`)) return;
+    for (const path of paths) {
+        await apiFetch('/explorer/api/delete', { path }, 'DELETE');
+    }
+    location.reload();
+}
+
+// ── 이름 변경 ──
+function ctxRename() {
+    hideCtx();
+    if (!ctxTargetPath) return;
+    const item = items.find(i => i.path === ctxTargetPath);
+    if (!item) return;
+    const newName = prompt('새 이름:', item.name);
+    if (!newName || newName === item.name) return;
+    apiFetch('/explorer/api/rename', { path: item.path, new_name: newName })
+        .then(() => location.reload())
+        .catch(e => alert('오류: ' + e.message));
+}
+
+// ── 새 폴더 ──
+function showMkdirDialog() {
+    const name = prompt('새 폴더 이름:');
+    if (!name) return;
+    apiFetch('/explorer/api/mkdir', { parent: CURRENT, name })
+        .then(() => location.reload())
+        .catch(e => alert('오류: ' + e.message));
+}
+
+// ── 업로드 ──
+async function handleUpload(input) {
+    const files = input.files;
+    if (!files.length) return;
+    const form = new FormData();
+    for (const f of files) form.append('files', f);
+    showStatus('⬆ 업로드 중...');
+    const res = await fetch(`/explorer/api/upload?path=${encodeURIComponent(CURRENT)}`, {
+        method: 'POST', body: form,
+    });
+    if (res.ok) { location.reload(); }
+    else { alert('업로드 실패'); }
+    input.value = '';
+}
+
+// ── 압축 / 해제 ──
+async function ctxExtract() {
+    hideCtx();
+    if (!ctxTargetPath) return;
+    await apiFetch('/explorer/api/extract', null, 'POST', `?path=${encodeURIComponent(ctxTargetPath)}`);
+    location.reload();
+}
+async function ctxCompress() {
+    hideCtx();
+    const paths = getSelectedPaths();
+    if (!paths.length) return;
+    const name = prompt('압축 파일 이름 (.zip 자동):');
+    if (!name) return;
+    await apiFetch('/explorer/api/compress', { paths, output_name: name, output_dir: CURRENT });
+    location.reload();
+}
+
+// ── 숨김 파일 토글 ──
+function toggleHidden() {
+    const url = new URL(location.href);
+    const cur = url.searchParams.get('show_hidden') === '1';
+    url.searchParams.set('show_hidden', cur ? '0' : '1');
+    location.href = url.toString();
+}
+
+// ── 다중 선택 ──
+let selectedPaths = new Set();
+
+function getSelectedPaths() {
+    return selectedPaths.size > 0 ? [...selectedPaths] : (ctxTargetPath ? [ctxTargetPath] : []);
+}
+
+// selectItem 교체
+function selectItem(e, path) {
+    e.stopPropagation();
+    if (e.ctrlKey || e.metaKey) {
+        selectedPaths.has(path) ? selectedPaths.delete(path) : selectedPaths.add(path);
+    } else if (e.shiftKey && selectedPath) {
+        const sorted = sortedItems();
+        const a = sorted.findIndex(i => i.path === selectedPath);
+        const b = sorted.findIndex(i => i.path === path);
+        const [lo, hi] = [Math.min(a,b), Math.max(a,b)];
+        selectedPaths = new Set(sorted.slice(lo, hi+1).map(i => i.path));
+    } else {
+        selectedPaths = new Set([path]);
+    }
+    selectedPath = path;
+    renderFiles();
+    loadPreview(path);
+    updateToolbarForSelection();
+    document.getElementById('statusSelected').textContent = `선택: ${selectedPaths.size}개`;
+}
+
+function updateToolbarForSelection() {
+    const hasFile = [...selectedPaths].some(p => { const i = items.find(x=>x.path===p); return i && !i.is_dir; });
+    document.getElementById('tbOpen').style.display = selectedPaths.size === 1 ? '' : 'none';
+    document.getElementById('tbDownload').style.display = hasFile ? '' : 'none';
+    if (hasFile && selectedPath) {
+        document.getElementById('tbDownload').href = '/explorer/download_file?path=' + encodeURIComponent(selectedPath);
+    }
+}
+
+// ── 공통 fetch 헬퍼 ──
+async function apiFetch(url, body, method='POST', qs='') {
+    const res = await fetch(url + qs, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : {},
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({detail: res.statusText}));
+        throw new Error(err.detail || res.statusText);
+    }
+    return res.json();
+}
+
+function showStatus(msg, duration=2500) {
+    const bar = document.getElementById('statusSelected');
+    const prev = bar.textContent;
+    bar.textContent = msg;
+    setTimeout(() => { bar.textContent = prev; }, duration);
+}
+
+// Click on empty space deselects
+document.getElementById('contentPane').addEventListener('click', (e) => {
+    if (e.target.closest('.file-row,.grid-item,.icon-item')) return;
+    selectedPath = null;
+    renderFiles();
+    document.getElementById('tbOpen').style.display = 'none';
+    document.getElementById('tbDownload').style.display = 'none';
+    document.getElementById('statusSelected').textContent = '';
+    document.getElementById('previewContent').innerHTML = '<div class="preview-empty">파일을 선택하면 미리보기가 표시됩니다</div>';
+});
+
+// ── INIT ──
+window.addEventListener('DOMContentLoaded', () => {
+    setView(currentView);
+    if (previewVisible) {
+        document.getElementById('previewPane').classList.remove('hidden');
+        document.getElementById('tbPreview').classList.add('active');
+        document.getElementById('previewResizer').style.display = '';
+    } else {
+        document.getElementById('previewResizer').style.display = 'none';
+    }
+    renderFiles();
+    buildNavTree();
+    initResizer('navResizer', 'navPane', 'left');
+    initResizer('previewResizer', 'previewPane', 'right');
+});
+</script>
+</body>
+</html>

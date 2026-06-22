@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Linuxplorer — 로그인</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    background: #f0f0f0;
+    display: flex; align-items: center; justify-content: center; height: 100vh;
+}
+.card {
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+    padding: 40px 36px; width: 340px; box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+}
+.logo { font-size: 28px; text-align: center; margin-bottom: 6px; }
+.title { text-align: center; font-size: 18px; font-weight: 700; margin-bottom: 6px; color: #1a1a1a; }
+.subtitle { text-align: center; font-size: 12px; color: #888; margin-bottom: 24px; }
+label { font-size: 12px; color: #6d6d6d; display: block; margin-bottom: 4px; }
+input[type=text], input[type=password] {
+    width: 100%; padding: 9px 12px; border: 1px solid #e0e0e0;
+    border-radius: 4px; font-size: 14px; outline: none; margin-bottom: 16px;
+}
+input:focus { border-color: #0078d4; }
+.error {
+    background: #fff0f0; border: 1px solid #ffcccc; border-radius: 4px;
+    padding: 8px 12px; font-size: 12px; color: #c00; margin-bottom: 16px;
+}
+button {
+    width: 100%; padding: 10px; background: #0078d4; color: #fff;
+    border: none; border-radius: 4px; font-size: 14px; cursor: pointer; font-weight: 600;
+}
+button:hover { background: #106ebe; }
+</style>
+</head>
+<body>
+<div class="card">
+    <div class="logo">🗂️</div>
+    <div class="title">Linuxplorer</div>
+    {% if error %}
+    <div class="error">{{ error }}</div>
+    {% endif %}
+    <div class="subtitle">계속하려면 로그인하세요</div>
+    <form method="post" action="/login">
+        <label>아이디</label>
+        <input type="text" name="username" autofocus autocomplete="username">
+        <label>비밀번호</label>
+        <input type="password" name="password" autocomplete="current-password">
+        <button type="submit">로그인</button>
+    </form>
+</div>
+</body>
+</html>
