@@ -956,7 +956,8 @@ function createTreeNode(item, depth) {
         const filtered = paths.filter(p => p !== item.path && !item.path.startsWith(p + '/'));
         if (!filtered.length) return;
         for (const src of filtered) {
-            try { await apiFetch('/explorer/api/move', { src, dst_dir: item.path }); }
+            const isCopy = e.ctrlKey || e.metaKey;
+            try { await apiFetch(isCopy ? '/explorer/api/copy' : '/explorer/api/move', { src, dst_dir: item.path }); }
             catch (err) { alert(`이동 실패: ${err.message}`); return; }
         }
         location.reload();
@@ -1545,6 +1546,45 @@ window.addEventListener('DOMContentLoaded', () => {
     buildNavTree();
     initResizer('navResizer', 'navPane', 'left');
     initResizer('previewResizer', 'previewPane', 'right');
+
+    // ── BREADCRUMB DROP ZONE ──
+    document.querySelectorAll('a.bc-item').forEach(bc => {
+        let decodedPath;
+        try {
+            const url = new URL(bc.href);
+            decodedPath = url.searchParams.get('path');
+        } catch { return; }
+        if (!decodedPath) return;
+
+        bc.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            bc.style.background = 'var(--win-accent)';
+            bc.style.color = '#fff';
+        });
+        bc.addEventListener('dragleave', (e) => {
+            if (!bc.contains(e.relatedTarget)) {
+                bc.style.background = '';
+                bc.style.color = '';
+            }
+        });
+        bc.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            bc.style.background = '';
+            bc.style.color = '';
+            let paths;
+            try { paths = JSON.parse(e.dataTransfer.getData('text/plain') || '[]'); }
+            catch { return; }
+            const filtered = paths.filter(p => p !== decodedPath && !decodedPath.startsWith(p + '/'));
+            if (!filtered.length) return;
+            const isCopy = e.ctrlKey || e.metaKey;
+            for (const src of filtered) {
+                try { await apiFetch(isCopy ? '/explorer/api/copy' : '/explorer/api/move', { src, dst_dir: decodedPath }); }
+                catch (err) { alert(`실패: ${err.message}`); return; }
+            }
+            location.reload();
+        });
+    });
 });
 
 // ── DRAG & DROP ──
@@ -1597,7 +1637,8 @@ function addDragHandlers(el, item) {
         let hasError = false;
         for (const src of filtered) {
             try {
-                await apiFetch('/explorer/api/move', { src, dst_dir: item.path });
+                const isCopy = e.ctrlKey || e.metaKey;
+                await apiFetch(isCopy ? '/explorer/api/copy' : '/explorer/api/move', { src, dst_dir: item.path });
             } catch (err) {
                 alert(`이동 실패: ${err.message}`);
                 hasError = true;
