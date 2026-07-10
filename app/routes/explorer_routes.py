@@ -1,12 +1,17 @@
+import mimetypes
+import os
+import re
+import shutil
+import tempfile
+import threading
+
 from fastapi import APIRouter, Request, HTTPException, Depends
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 from starlette.responses import RedirectResponse
 from app.services.file_service import FileService
 from app.routes.auth_routes import get_current_user
-import os
-import mimetypes
-import shutil
 from fastapi import UploadFile, File as FastAPIFile
 from pydantic import BaseModel
 
@@ -107,6 +112,46 @@ EXT_MAP = {
     "word": (".docx", ".doc"),
 }
 
+# ── 비디오/오디오 MIME 타입 명시적 매핑 ──
+# mimetypes.guess_type()은 서버 OS의 /etc/mime.types에 의존하기 때문에
+# .mkv, .avi 같은 확장자는 None을 반환하는 경우가 많다 (→ 브라우저가 재생 대신
+# application/octet-stream으로 받아 다운로드를 시도하거나 아무 반응이 없음).
+# 그래서 흔한 확장자는 직접 매핑해서 확실하게 지정한다.
+VIDEO_MIME_MAP = {
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm",
+    ".ogg": "video/ogg",
+    ".ogv": "video/ogg",
+    ".mov": "video/quicktime",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
+    ".wmv": "video/x-ms-wmv",
+    ".flv": "video/x-flv",
+    ".3gp": "video/3gpp",
+}
+AUDIO_MIME_MAP = {
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".flac": "audio/flac",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+}
+
+
+def guess_media_type(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in VIDEO_MIME_MAP:
+        return VIDEO_MIME_MAP[ext]
+    if ext in AUDIO_MIME_MAP:
+        return AUDIO_MIME_MAP[ext]
+    mime, _ = mimetypes.guess_type(path)
+    if mime:
+        return mime
+    if ext in EXT_MAP.get("text", ()):
+        return "text/plain"
+    return "application/octet-stream"
+
 
 # ── 인증 의존성 ──
 def require_auth(request: Request):
@@ -126,9 +171,9 @@ def get_dir_size(path: str) -> int:
                     total += get_dir_size(entry.path)
                 else:
                     total += entry.stat().st_size
-            except PermissionError, OSError:
+            except (PermissionError, OSError):
                 continue
-    except PermissionError, OSError:
+    except (PermissionError, OSError):
         pass
     return total
 
@@ -193,6 +238,106 @@ def _safe_path(path: str) -> str:
     if not abs_path.startswith(abs_root):
         raise HTTPException(status_code=403, detail="Access denied")
     return abs_path
+
+
+# ── HDD 친화적 Range 스트리밍 ──
+# 비디오 seek/버퍼링은 브라우저가 여러 Range 요청을 동시에 날리는 방식이라,
+# 로컬 HDD처럼 랜덤 액세스 비용이 큰 디스크에서는 헤드가 여러 오프셋 사이를
+# 계속 오가며(thrashing) 응답이 느려지다 끊길 수 있다. 아래 세 가지로 완화한다:
+#   1) 파일당 동시 읽기 개수를 세마포어로 제한 → 병렬 seek 자체를 줄인다
+#   2) posix_fadvise로 커널에 readahead 힌트를 줘서 순차 읽기처럼 캐싱되게 한다
+#   3) 읽기 청크를 크게(4MB) 잡아서 seek 1번당 처리량을 늘린다
+RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
+READ_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
+MAX_RANGE_CHUNK = 32 * 1024 * 1024  # 한 응답 최대 32MB (열린 범위 요청 방어용)
+MAX_CONCURRENT_READS_PER_FILE = 2
+
+_file_semaphores: dict[str, threading.Semaphore] = {}
+_file_semaphores_lock = threading.Lock()
+
+
+def _get_file_semaphore(path: str) -> threading.Semaphore:
+    with _file_semaphores_lock:
+        sem = _file_semaphores.get(path)
+        if sem is None:
+            sem = threading.Semaphore(MAX_CONCURRENT_READS_PER_FILE)
+            _file_semaphores[path] = sem
+        return sem
+
+
+def _iter_file_range_hdd(path: str, start: int, end: int):
+    """세마포어로 동시 접근을 제한하고, fadvise로 readahead 힌트를 준 뒤
+    큰 청크 단위로 순차 읽기. 세마포어를 쥐고 있는 동안만 실제로 디스크를
+    건드리기 때문에, 브라우저가 여러 Range를 동시에 열어도 서버 입장에서는
+    최대 MAX_CONCURRENT_READS_PER_FILE개만 실제로 seek한다."""
+    sem = _get_file_semaphore(path)
+    length = end - start + 1
+    with sem:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            try:
+                os.posix_fadvise(fd, start, length, os.POSIX_FADV_SEQUENTIAL)
+                os.posix_fadvise(fd, start, length, os.POSIX_FADV_WILLNEED)
+            except (AttributeError, OSError):
+                pass  # posix_fadvise 미지원 플랫폼(macOS 등)은 조용히 건너뜀
+            os.lseek(fd, start, os.SEEK_SET)
+            remaining = length
+            while remaining > 0:
+                read_size = min(READ_CHUNK_SIZE, remaining)
+                data = os.read(fd, read_size)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+        finally:
+            os.close(fd)
+
+
+def _range_response(request: Request, path: str, file_size: int, media_type: str):
+    range_header = request.headers.get("range")
+
+    if range_header:
+        m = RANGE_RE.match(range_header)
+        if m:
+            start_str, end_str = m.groups()
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
+            end = min(end, file_size - 1, start + MAX_RANGE_CHUNK - 1)
+
+            if start > end or start >= file_size:
+                return StreamingResponse(
+                    iter(()),
+                    status_code=416,
+                    headers={
+                        "Content-Range": f"bytes */{file_size}",
+                        "Accept-Ranges": "bytes",
+                    },
+                )
+
+            content_length = end - start + 1
+            headers = {
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(content_length),
+                "Cache-Control": "no-cache",
+            }
+            return StreamingResponse(
+                _iter_file_range_hdd(path, start, end),
+                status_code=206,
+                media_type=media_type,
+                headers=headers,
+            )
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size),
+        "Cache-Control": "no-cache",
+    }
+    return StreamingResponse(
+        _iter_file_range_hdd(path, 0, file_size - 1),
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 # ── ROUTES ──
@@ -297,8 +442,8 @@ async def view(
     try:
         for entry in os.scandir(current_path):
             try:
-                if not show_hidden and entry.name.startswith('.'):
-                    continue                                          # ← 추가
+                if not show_hidden and entry.name.startswith("."):
+                    continue
                 items.append(build_file_info(entry))
             except (PermissionError, OSError):
                 continue
@@ -364,32 +509,23 @@ async def download_file(path: str, user=Depends(require_auth)):
     path = _safe_path(path)
     if not os.path.exists(path) or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
-    mime, _ = mimetypes.guess_type(path)
     return FileResponse(
         path=path,
         filename=os.path.basename(path),
-        media_type=mime or "application/octet-stream",
+        media_type=guess_media_type(path),
     )
 
 
 @router.get("/serve_file")
 async def serve_file(request: Request, path: str, user=Depends(require_auth)):
+    """미리보기/재생용 엔드포인트. 로컬 HDD의 랜덤 seek 비용을 줄이기 위해
+    동시 읽기 제한 + fadvise + 큰 청크 순차읽기를 쓰는 커스텀 스트리밍을 사용."""
     path = _safe_path(path)
     if not os.path.exists(path) or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
-    mime, _ = mimetypes.guess_type(path)
-    if not mime:
-        ext = os.path.splitext(path)[1].lower()
-        mime = (
-            "text/plain"
-            if ext in EXT_MAP.get("text", ())
-            else "application/octet-stream"
-        )
-    return FileResponse(
-        path=path,
-        media_type=mime,
-        headers={"Cache-Control": "no-store", "Accept-Ranges": "bytes"},
-    )
+    media_type = guess_media_type(path)
+    file_size = os.path.getsize(path)
+    return _range_response(request, path, file_size, media_type)
 
 
 @router.get("/api/list")
@@ -405,7 +541,7 @@ async def api_list(
         for entry in os.scandir(path):
             try:
                 items.append(build_file_info(entry))
-            except PermissionError, OSError:
+            except (PermissionError, OSError):
                 continue
     except PermissionError:
         return {"items": [], "total": 0, "page": 1, "total_pages": 1}
@@ -558,3 +694,39 @@ async def api_extract(path: str, user=Depends(require_auth)):
     else:
         raise HTTPException(status_code=400, detail="지원하지 않는 압축 형식")
     return {"ok": True, "extracted_to": out_dir}
+
+
+@router.get("/download_dir")
+async def download_dir(path: str, user=Depends(require_auth)):
+    import zipfile
+
+    path = _safe_path(path)
+    if not os.path.exists(path) or not os.path.isdir(path):
+        raise HTTPException(status_code=404, detail="Directory not found")
+
+    dir_name = os.path.basename(path)
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
+
+    try:
+        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(path):
+                dirs[:] = [d for d in dirs if not d.startswith(".")]
+                for file in files:
+                    full = os.path.join(root, file)
+                    arcname = os.path.join(dir_name, os.path.relpath(full, path))
+                    zf.write(full, arcname)
+    except Exception as e:
+        os.unlink(tmp.name)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # 기존 코드는 응답 후 임시 zip을 지우는 로직이 없어서 디스크에 계속 쌓였다.
+    # BackgroundTask로 응답 전송이 끝난 뒤 삭제하도록 수정.
+    return FileResponse(
+        path=tmp.name,
+        filename=f"{dir_name}.zip",
+        media_type="application/zip",
+        background=BackgroundTask(os.unlink, tmp.name),
+        headers={"Content-Disposition": f'attachment; filename="{dir_name}.zip"'},
+    )

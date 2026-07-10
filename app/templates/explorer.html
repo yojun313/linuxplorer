@@ -420,6 +420,7 @@
     <div class="tb-sep"></div>
     <button class="tb-btn" onclick="openFullscreen()" id="tbOpen" title="열기" style="display:none;">🔲 열기</button>
     <a class="tb-btn" id="tbDownload" href="#" style="display:none; text-decoration:none;" title="다운로드">⬇ 다운로드</a>
+    <a class="tb-btn" id="tbDownloadDir" href="#" style="display:none; text-decoration:none;" title="폴더 다운로드">📦 폴더 다운로드</a>
     <div class="tb-sep"></div>
     <button class="tb-btn" onclick="showMkdirDialog()">📁 새 폴더</button>
     <button class="tb-btn" id="tbUpload" onclick="document.getElementById('uploadInput').click()">⬆ 업로드</button>
@@ -510,6 +511,7 @@
     <div class="ctx-item" onclick="ctxOpen()">📂 열기</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" id="ctxDownloadItem" onclick="ctxDownload()">⬇ 다운로드</div>
+    <div class="ctx-item" id="ctxDownloadDirItem" onclick="ctxDownloadDir()" style="display:none;">📦 폴더 다운로드</div>
     <div class="ctx-sep"></div>
     <div class="ctx-item" onclick="ctxRename()">✏️ 이름 바꾸기</div>
     <div class="ctx-item" onclick="ctxCut()">✂️ 잘라내기</div>
@@ -839,12 +841,14 @@ async function loadPreview(path) {
         previewHtml = `<div class="preview-content"><img src="${mediaUrl}" onerror="this.outerHTML='미리보기 불가'"></div>`;
     } else if (item.type === 'video') {
         if (isBrowserPlayable(item.ext)) {
-            previewHtml = `<div class="preview-content"><video id="pv-video" controls style="max-width:100%;max-height:300px;"></video><div id="pv-video-loading" style="color:var(--win-text-muted);font-size:12px;padding:8px;">준비 중...</div></div>`;
+            // blob으로 통째로 받지 않고, 브라우저가 range request로 알아서
+            // 스트리밍하도록 src를 바로 지정한다 (Plate Masker 프론트와 동일 방식).
+            previewHtml = `<div class="preview-content"><video id="pv-video" controls preload="metadata" style="max-width:100%;max-height:300px;" src="${mediaUrl}"></video></div>`;
         } else {
             previewHtml = `<div class="preview-empty">${item.ext} 형식은 브라우저 재생 불가<br>다운로드 후 재생해주세요</div>`;
         }
     } else if (item.type === 'audio') {
-        previewHtml = `<div class="preview-content" style="padding:24px;"><audio id="pv-audio" controls style="width:100%;"></audio><div id="pv-audio-loading" style="color:var(--win-text-muted);font-size:12px;">준비 중...</div></div>`;
+        previewHtml = `<div class="preview-content" style="padding:24px;"><audio id="pv-audio" controls preload="metadata" style="width:100%;" src="${mediaUrl}"></audio></div>`;
     } else if (item.type === 'text') {
         try {
             const res = await fetch('/explorer/api/file_info?path=' + encodeURIComponent(path));
@@ -885,12 +889,6 @@ async function loadPreview(path) {
             <button class="pv-btn" onclick="openFullscreen()">열기</button>
             <a class="pv-btn primary" href="${dlUrl}">다운로드</a>
         </div>`;
-
-    if (item.type === 'video' && isBrowserPlayable(item.ext)) {
-        loadVideoBlob(mediaUrl, 'pv-video', 'pv-video-loading');
-    } else if (item.type === 'audio') {
-        loadVideoBlob(mediaUrl, 'pv-audio', 'pv-audio-loading');
-    }
 }
 
 // ── NAV TREE ──
@@ -1050,9 +1048,8 @@ function renderFullscreen() {
         body.innerHTML = `<img src="${url}">`;
     } else if (item.type === 'video') {
         if (isBrowserPlayable(item.ext)) {
-            body.innerHTML = `<video id="fs-video" controls autoplay style="max-width:95vw;max-height:85vh;"></video>
-                <div id="fs-video-loading" style="color:#aaa;font-size:14px;margin-top:8px;">영상 로딩 중...</div>`;
-            loadVideoBlob(url, 'fs-video', 'fs-video-loading');
+            // blob 다운로드 없이 src를 바로 지정 → 브라우저가 range request로 스트리밍
+            body.innerHTML = `<video controls autoplay preload="metadata" style="max-width:95vw;max-height:85vh;" src="${url}"></video>`;
         } else {
             body.innerHTML = `<div style="color:#fff;text-align:center;padding:40px;">
                 <p style="font-size:1.1rem;margin-bottom:8px;">🎬 ${escHtml(item.name)}</p>
@@ -1062,9 +1059,7 @@ function renderFullscreen() {
             </div>`;
         }
     } else if (item.type === 'audio') {
-        body.innerHTML = `<audio id="fs-audio" controls autoplay style="min-width:300px;"></audio>
-            <div id="fs-audio-loading" style="color:#aaa;font-size:14px;margin-top:8px;">오디오 로딩 중...</div>`;
-        loadVideoBlob(url, 'fs-audio', 'fs-audio-loading');
+        body.innerHTML = `<audio controls autoplay preload="metadata" style="min-width:300px;" src="${url}"></audio>`;
     } else if (item.type === 'document' && item.ext === '.pdf') {
         body.innerHTML = `<iframe src="${url}" style="width:90vw;height:85vh;border:none;border-radius:8px;"></iframe>`;
     } else if (item.type === 'text') {
@@ -1089,10 +1084,6 @@ function renderFullscreen() {
 }
 
 function closeFullscreen() {
-    const vid = document.getElementById('fs-video');
-    const aud = document.getElementById('fs-audio');
-    if (vid?.src?.startsWith('blob:')) URL.revokeObjectURL(vid.src);
-    if (aud?.src?.startsWith('blob:')) URL.revokeObjectURL(aud.src);
     document.getElementById('fsModal').classList.remove('open');
     document.body.style.overflow = '';
     fsStopAuto();
@@ -1161,29 +1152,6 @@ function isBrowserPlayable(ext) {
     return ['.mp4','.webm','.ogg','.mov'].includes(ext);
 }
 
-async function loadVideoBlob(url, elementId, loadingId) {
-    const loading = document.getElementById(loadingId);
-    try {
-        if (loading) loading.textContent = '다운로드 중...';
-        const res = await fetch(url, { cache: 'no-store', headers: { 'Accept': '*/*' } });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const contentLength = res.headers.get('content-length');
-        if (loading) loading.textContent = '버퍼링 중... (' + (contentLength || '?') + ' bytes)';
-        const arrayBuffer = await res.arrayBuffer();
-        const mime = res.headers.get('content-type') || 'video/mp4';
-        const blob = new Blob([arrayBuffer], { type: mime });
-        if (loading) loading.textContent = blob.size + ' bytes 로드 완료';
-        const blobUrl = URL.createObjectURL(blob);
-        const el = document.getElementById(elementId);
-        if (!el) { if (loading) loading.textContent = '요소를 찾을 수 없음'; return; }
-        el.src = blobUrl;
-        el.onerror = () => { if (loading) loading.textContent = '재생 실패 (blob ' + blob.size + ' bytes / type: ' + mime + ')'; };
-        el.onloadeddata = () => { if (loading) loading.remove(); };
-    } catch (e) {
-        if (loading) loading.textContent = '실패: ' + e.message;
-    }
-}
-
 function syntaxHL(json) {
     json = escHtml(json);
     return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, m => {
@@ -1210,6 +1178,7 @@ document.addEventListener('contextmenu', (e) => {
     const item = items.find(i => i.path === path);
 
     document.getElementById('ctxDownloadItem').style.display = (item && item.is_dir) ? 'none' : '';
+    document.getElementById('ctxDownloadDirItem').style.display = (item && item.is_dir) ? '' : 'none';
     document.getElementById('ctxDownloadItem').previousElementSibling.style.display = (item && item.is_dir) ? 'none' : '';
 
     const menu = document.getElementById('ctxMenu');
@@ -1261,6 +1230,12 @@ function ctxDownload() {
     hideCtx();
     if (!ctxTargetPath) return;
     window.location.href = '/explorer/download_file?path=' + encodeURIComponent(ctxTargetPath);
+}
+
+function ctxDownloadDir() {
+    hideCtx();
+    if (!ctxTargetPath) return;
+    window.location.href = '/explorer/download_dir?path=' + encodeURIComponent(ctxTargetPath);
 }
 
 function ctxProperties() {
@@ -1492,11 +1467,26 @@ function selectItem(e, path) {
 }
 
 function updateToolbarForSelection() {
-    const hasFile = [...selectedPaths].some(p => { const i = items.find(x=>x.path===p); return i && !i.is_dir; });
+    const hasFile = [...selectedPaths].some(p => {
+        const i = items.find(x => x.path === p);
+        return i && !i.is_dir;
+    });
+    const hasDir = [...selectedPaths].some(p => {
+        const i = items.find(x => x.path === p);
+        return i && i.is_dir;
+    });
+
     document.getElementById('tbOpen').style.display = selectedPaths.size === 1 ? '' : 'none';
     document.getElementById('tbDownload').style.display = hasFile ? '' : 'none';
+    document.getElementById('tbDownloadDir').style.display = hasDir ? '' : 'none';
+
     if (hasFile && selectedPath) {
-        document.getElementById('tbDownload').href = '/explorer/download_file?path=' + encodeURIComponent(selectedPath);
+        document.getElementById('tbDownload').href =
+            '/explorer/download_file?path=' + encodeURIComponent(selectedPath);
+    }
+    if (hasDir && selectedPath) {
+        document.getElementById('tbDownloadDir').href =
+            '/explorer/download_dir?path=' + encodeURIComponent(selectedPath);
     }
 }
 
