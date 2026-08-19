@@ -122,13 +122,30 @@ EXT_MAP = {
     "text": (
         ".txt",
         ".json",
+        ".jsonl",
+        ".ndjson",
+        ".jsonc",
         ".csv",
+        ".tsv",
         ".md",
+        ".markdown",
+        ".rst",
+        ".adoc",
         ".py",
+        ".pyi",
         ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
         ".js",
+        ".mjs",
+        ".cjs",
         ".html",
+        ".htm",
         ".css",
+        ".scss",
+        ".sass",
+        ".less",
         ".yaml",
         ".yml",
         ".toml",
@@ -137,15 +154,22 @@ EXT_MAP = {
         ".cfg",
         ".ini",
         ".conf",
+        ".properties",
         ".cpp",
+        ".cc",
         ".c",
         ".h",
+        ".hpp",
         ".java",
         ".rs",
         ".go",
+        ".mod",
+        ".sum",
         ".ts",
         ".tsx",
         ".jsx",
+        ".vue",
+        ".svelte",
         ".sql",
         ".r",
         ".rb",
@@ -154,16 +178,76 @@ EXT_MAP = {
         ".kt",
         ".scala",
         ".lua",
+        ".dart",
+        ".pl",
+        ".pm",
+        ".ex",
+        ".exs",
+        ".erl",
+        ".hs",
+        ".clj",
+        ".cljs",
+        ".groovy",
+        ".gradle",
+        ".vim",
+        ".el",
         ".bat",
         ".ps1",
+        ".psm1",
         ".env",
         ".gitignore",
+        ".gitattributes",
+        ".dockerignore",
         ".dockerfile",
+        ".editorconfig",
+        ".diff",
+        ".patch",
+        ".graphql",
+        ".gql",
+        ".proto",
+        ".tf",
+        ".tfvars",
+        ".lock",
+        ".srt",
+        ".vtt",
     ),
     "archive": (".zip", ".tar", ".gz", ".bz2", ".7z", ".rar", ".xz"),
     "spreadsheet": (".xlsx", ".xls", ".csv"),
     "presentation": (".pptx", ".ppt"),
     "word": (".docx", ".doc"),
+}
+
+# 확장자가 없거나 특이한(예: Dockerfile, Makefile) 잘 알려진 텍스트 파일명
+KNOWN_TEXT_FILENAMES = {
+    "dockerfile",
+    "makefile",
+    "license",
+    "license.txt",
+    "readme",
+    "changelog",
+    "authors",
+    "contributing",
+    "gemfile",
+    "gemfile.lock",
+    "rakefile",
+    "procfile",
+    "vagrantfile",
+    "cmakelists.txt",
+    ".gitignore",
+    ".gitattributes",
+    ".dockerignore",
+    ".npmignore",
+    ".editorconfig",
+    ".env",
+    ".bashrc",
+    ".zshrc",
+    ".vimrc",
+    ".npmrc",
+    ".prettierrc",
+    ".eslintrc",
+    ".babelrc",
+    ".flake8",
+    ".pylintrc",
 }
 
 # ── 비디오/오디오 MIME 타입 명시적 매핑 ──
@@ -234,12 +318,30 @@ def get_dir_size(path: str) -> int:
     return total
 
 
-def classify_file(ext: str) -> str:
+def classify_file(ext: str, name: str = "") -> str:
     ext = ext.lower()
     for file_type, extensions in EXT_MAP.items():
         if ext in extensions:
             return file_type
+    if name.lower() in KNOWN_TEXT_FILENAMES:
+        return "text"
     return "other"
+
+
+def _looks_like_text(path: str, sample_size: int = 8192) -> bool:
+    """확장자로 분류되지 않은 파일이 실제로는 텍스트인지 내용을 살짝 엿봐서 판단한다
+    (미리보기를 최대한 많은 형식에서 지원하기 위함). 파일 전체가 아니라 앞부분만 읽는다."""
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(sample_size)
+    except OSError:
+        return False
+    if not chunk:
+        return True
+    if b"\x00" in chunk:
+        return False
+    control_bytes = sum(1 for b in chunk if b < 9 or (13 < b < 32))
+    return (control_bytes / len(chunk)) < 0.05
 
 
 def build_file_info(entry_or_path, is_scandir=True):
@@ -279,7 +381,7 @@ def build_file_info(entry_or_path, is_scandir=True):
         "name": name,
         "path": path,
         "is_dir": False,
-        "type": classify_file(ext),
+        "type": classify_file(ext, name),
         "size_raw": size,
         "size": FileService.format_size(size),
         "ext": ext,
@@ -451,7 +553,7 @@ async def search(
             items.append(
                 {
                     **item,
-                    "type": classify_file(ext),
+                    "type": classify_file(ext, item.get("name", "")),
                     "ext": ext,
                     "size": item.get("size", ""),
                 }
@@ -650,7 +752,12 @@ async def api_file_info(path: str, user=Depends(require_auth)):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Not found")
     info = build_file_info(path, is_scandir=False)
-    if info["type"] == "text" and info["size_raw"] < 2 * 1024 * 1024:
+    previewable_as_text = info["type"] == "text" or (
+        info["type"] == "other"
+        and 0 < info["size_raw"] < 2 * 1024 * 1024
+        and _looks_like_text(path)
+    )
+    if previewable_as_text and info["size_raw"] < 2 * 1024 * 1024:
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 info["content"] = f.read(200_000)

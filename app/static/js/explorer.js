@@ -364,11 +364,11 @@ function selectItem(e, path) {
 
 function updateToolbarForSelection() {
     const hasFile = [...selectedPaths].some(p => {
-        const i = items.find(x => x.path === p);
+        const i = findItemByPath(p);
         return i && !i.is_dir;
     });
     const hasDir = [...selectedPaths].some(p => {
-        const i = items.find(x => x.path === p);
+        const i = findItemByPath(p);
         return i && i.is_dir;
     });
 
@@ -390,6 +390,149 @@ function openItem(path, isDir) {
     } else {
         openFullscreen();
     }
+}
+
+// ── 키보드 방향키 이동 (macOS Finder 스타일) ──
+function computeGridColumns(container) {
+    if (!container || !container.children.length) return 1;
+    const firstTop = container.children[0].offsetTop;
+    let cols = 0;
+    for (const child of container.children) {
+        if (child.offsetTop === firstTop) cols++;
+        else break;
+    }
+    return Math.max(1, cols);
+}
+
+function scrollPathIntoView(path) {
+    const containerId = { details: 'fileListDetails', tiles: 'fileListTiles', icons: 'fileListIcons', gallery: 'galleryFilmstrip' }[currentView];
+    const container = containerId && document.getElementById(containerId);
+    if (!container) return;
+    for (const child of container.children) {
+        if (child.dataset && child.dataset.path === path) {
+            child.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            break;
+        }
+    }
+}
+
+function selectByPath(path) {
+    if (!path) return;
+    selectedPath = path;
+    selectedPaths = new Set([path]);
+    renderFiles();
+    loadPreview(path);
+    updateToolbarForSelection();
+    document.getElementById('statusSelected').textContent = `선택: ${selectedPaths.size}개 ${selectedSizeLabel()}`;
+    scrollPathIntoView(path);
+}
+
+function selectGalleryItem(item) {
+    if (!item) return;
+    selectedPath = item.path;
+    selectedPaths = new Set([item.path]);
+    updateToolbarForSelection();
+    const sorted = sortedItems();
+    renderGalleryFilmstrip(sorted);
+    renderGalleryMain();
+    document.getElementById('statusSelected').textContent = '선택: ' + item.name;
+    scrollPathIntoView(item.path);
+}
+
+function moveFlatSelection(direction) {
+    const sorted = sortedItems();
+    if (!sorted.length) return;
+    const idx = sorted.findIndex(i => i.path === selectedPath);
+
+    if (currentView === 'details') {
+        if (idx < 0) { selectByPath(sorted[0].path); return; }
+        if (direction === 'left') { navigateUp(); return; }
+        if (direction === 'right') {
+            const cur = sorted[idx];
+            if (cur && cur.is_dir) openItem(cur.path, true);
+            return;
+        }
+        const next = direction === 'up' ? Math.max(0, idx - 1) : Math.min(sorted.length - 1, idx + 1);
+        selectByPath(sorted[next].path);
+        return;
+    }
+
+    if (currentView === 'tiles' || currentView === 'icons') {
+        if (idx < 0) { selectByPath(sorted[0].path); return; }
+        const container = document.getElementById(currentView === 'tiles' ? 'fileListTiles' : 'fileListIcons');
+        const cols = computeGridColumns(container);
+        let next = idx;
+        if (direction === 'up') next = Math.max(0, idx - cols);
+        else if (direction === 'down') next = Math.min(sorted.length - 1, idx + cols);
+        else if (direction === 'left') next = Math.max(0, idx - 1);
+        else if (direction === 'right') next = Math.min(sorted.length - 1, idx + 1);
+        selectByPath(sorted[next].path);
+        return;
+    }
+
+    if (currentView === 'gallery') {
+        if (idx < 0) { selectGalleryItem(sorted[0]); return; }
+        const next = (direction === 'left' || direction === 'up') ? Math.max(0, idx - 1) : Math.min(sorted.length - 1, idx + 1);
+        selectGalleryItem(sorted[next]);
+        return;
+    }
+}
+
+function activeColumnPaneIndex() {
+    for (let i = 0; i < columns.length; i++) {
+        if (columns[i].selected === selectedPath) return i;
+    }
+    return columns.length - 1;
+}
+
+async function moveColumnSelection(direction) {
+    if (!columns.length) return;
+    if (!selectedPath) {
+        const first = sortColItems(columns[0].items)[0];
+        if (first) await columnRowClick(0, first);
+        return;
+    }
+
+    const idx = activeColumnPaneIndex();
+    const pane = columns[idx];
+    if (!pane) return;
+    const sorted = sortColItems(pane.items);
+
+    if (direction === 'up' || direction === 'down') {
+        const curIdx = sorted.findIndex(i => i.path === selectedPath);
+        const next = direction === 'up'
+            ? Math.max(0, curIdx < 0 ? 0 : curIdx - 1)
+            : Math.min(sorted.length - 1, curIdx < 0 ? 0 : curIdx + 1);
+        if (sorted[next]) await columnRowClick(idx, sorted[next]);
+        return;
+    }
+
+    if (direction === 'left') {
+        if (idx > 0) {
+            const folderPath = columns[idx].path;
+            const folderItem = columns[idx - 1].items.find(i => i.path === folderPath);
+            if (folderItem) await columnRowClick(idx - 1, folderItem);
+        }
+        return;
+    }
+
+    if (direction === 'right') {
+        const curItem = sorted.find(i => i.path === selectedPath);
+        if (!curItem || !curItem.is_dir) return;
+        if (!(columns[idx + 1] && columns[idx + 1].path === curItem.path)) {
+            await columnRowClick(idx, curItem);
+        }
+        const childPane = columns[idx + 1];
+        if (childPane) {
+            const childSorted = sortColItems(childPane.items);
+            if (childSorted[0]) await columnRowClick(idx + 1, childSorted[0]);
+        }
+    }
+}
+
+function moveSelection(direction) {
+    if (currentView === 'column') moveColumnSelection(direction);
+    else moveFlatSelection(direction);
 }
 
 // ── PAGINATION ──
@@ -450,9 +593,41 @@ function goToPage(page) {
     location.href = url.toString();
 }
 
+// items는 현재 폴더 항목만 담고 있어, 컬럼(계층) 뷰에서 다른 패널의 항목을 찾을 땐
+// 각 컬럼 패널이 들고 있는 항목 목록까지 함께 뒤져야 한다.
+function findItemByPath(path) {
+    let found = items.find(i => i.path === path);
+    if (found) return found;
+    for (const col of columns) {
+        found = col.items.find(i => i.path === path);
+        if (found) return found;
+    }
+    return null;
+}
+
+// 텍스트로 보이는 파일(.json/.jsonl 포함, 확장자 미분류 파일도 서버가 내용을 살짝 엿봐서 판단)의
+// 본문을 가져와 <pre> 블록으로 렌더링. 미리보기 불가능하면 null 반환.
+async function textPreviewHtml(path, ext) {
+    try {
+        const res = await fetch('/explorer/api/file_info?path=' + encodeURIComponent(path));
+        const info = await res.json();
+        if (info.content == null) return null;
+        let display = info.content;
+        if (ext === '.json') {
+            try { display = syntaxHL(JSON.stringify(JSON.parse(display), null, 2)); }
+            catch { display = escapeHtml(display); }
+        } else {
+            display = escapeHtml(display);
+        }
+        return `<div class="preview-content"><pre>${display}</pre></div>`;
+    } catch {
+        return null;
+    }
+}
+
 // ── 미리보기 컴포넌트 (본문만 생성 → previewContent / colPreviewContent / galleryMainContent 어디든 재사용) ──
 async function previewHtmlFor(path) {
-    const item = items.find(i => i.path === path);
+    const item = findItemByPath(path);
     if (!item) return '<div class="preview-empty">항목을 찾을 수 없습니다</div>';
 
     if (item.is_dir) {
@@ -484,28 +659,13 @@ async function previewHtmlFor(path) {
     } else if (item.type === 'audio') {
         previewHtml = `<div class="preview-content" style="padding:24px;"><audio controls preload="metadata" style="width:100%;" src="${mediaUrl}"></audio></div>`;
     } else if (item.type === 'text') {
-        try {
-            const res = await fetch('/explorer/api/file_info?path=' + encodeURIComponent(path));
-            const info = await res.json();
-            if (info.content != null) {
-                let display = info.content;
-                if (item.ext === '.json') {
-                    try { display = syntaxHL(JSON.stringify(JSON.parse(display), null, 2)); }
-                    catch { display = escapeHtml(display); }
-                } else {
-                    display = escapeHtml(display);
-                }
-                previewHtml = `<div class="preview-content"><pre>${display}</pre></div>`;
-            } else {
-                previewHtml = `<div class="preview-empty">미리보기 불가</div>`;
-            }
-        } catch {
-            previewHtml = `<div class="preview-empty">불러오기 실패</div>`;
-        }
+        previewHtml = (await textPreviewHtml(path, item.ext)) || `<div class="preview-empty">미리보기 불가</div>`;
     } else if (item.type === 'document' && item.ext === '.pdf') {
         previewHtml = `<div class="preview-content"><iframe src="${mediaUrl}" style="width:100%;height:100%;border:none;flex:1;"></iframe></div>`;
     } else {
-        previewHtml = `<div class="preview-empty">${item.ext || ''} 파일은 미리보기를 지원하지 않습니다</div>`;
+        // 확장자로는 분류되지 않았지만 실제로는 텍스트일 수 있는 파일까지 폭넓게 지원
+        // (서버가 파일 앞부분을 살짝 읽어 텍스트 여부를 판단함)
+        previewHtml = (await textPreviewHtml(path, item.ext)) || `<div class="preview-empty">${item.ext || ''} 파일은 미리보기를 지원하지 않습니다</div>`;
     }
 
     return `
@@ -677,7 +837,7 @@ function toggleFavorite(path, name) {
 function ctxToggleFavorite() {
     hideCtx();
     if (!ctxTargetPath) return;
-    const item = items.find(i => i.path === ctxTargetPath);
+    const item = findItemByPath(ctxTargetPath);
     const name = item ? item.name : ctxTargetPath.split('/').pop();
     toggleFavorite(ctxTargetPath, name);
 }
@@ -728,10 +888,15 @@ let fsAutoInterval = null;
 
 function openFullscreen() {
     if (!selectedPath) return;
-    const item = items.find(i => i.path === selectedPath);
+    const item = findItemByPath(selectedPath);
     if (!item || item.is_dir) return;
 
-    fsItems = items.filter(i => !i.is_dir);
+    let siblingItems = items;
+    if (currentView === 'column') {
+        const idx = activeColumnPaneIndex();
+        if (columns[idx]) siblingItems = columns[idx].items;
+    }
+    fsItems = siblingItems.filter(i => !i.is_dir);
     fsIndex = fsItems.findIndex(i => i.path === selectedPath);
     if (fsIndex < 0) fsIndex = 0;
 
@@ -775,11 +940,21 @@ function renderFullscreen() {
             body.innerHTML = `<pre>${display}</pre>`;
         }).catch(() => { body.innerHTML = '<pre>불러오기 실패</pre>'; });
     } else {
-        body.innerHTML = `<div style="color:#fff;text-align:center;padding:40px;">
-            <p style="margin-bottom:16px;">미리보기를 지원하지 않는 파일입니다</p>
-            <a href="/explorer/download_file?path=${encodeURIComponent(item.path)}"
-               style="color:#fff;background:var(--win-accent);padding:10px 24px;border-radius:6px;text-decoration:none;">다운로드</a>
-        </div>`;
+        // 확장자로는 분류되지 않았지만 실제로는 텍스트일 수 있는 파일까지 폭넓게 지원
+        // (서버가 파일 앞부분을 살짝 읽어 텍스트 여부를 판단함)
+        body.innerHTML = `<div style="color:#fff;text-align:center;padding:40px;">불러오는 중...</div>`;
+        textPreviewHtml(item.path, item.ext).then(html => {
+            if (fsItems[fsIndex] !== item) return; // 그 사이 다른 파일로 넘어갔으면 무시
+            if (html) {
+                body.innerHTML = html;
+            } else {
+                body.innerHTML = `<div style="color:#fff;text-align:center;padding:40px;">
+                    <p style="margin-bottom:16px;">미리보기를 지원하지 않는 파일입니다</p>
+                    <a href="/explorer/download_file?path=${encodeURIComponent(item.path)}"
+                       style="color:#fff;background:var(--win-accent);padding:10px 24px;border-radius:6px;text-decoration:none;">다운로드</a>
+                </div>`;
+            }
+        });
     }
 
     document.getElementById('fsIndex').textContent = `${fsIndex + 1} / ${fsItems.length}`;
@@ -876,7 +1051,7 @@ function showItemContextMenu(e, row) {
     const path = row.dataset?.path;
     if (!path) return;
     ctxTargetPath = path;
-    const item = items.find(i => i.path === path);
+    const item = findItemByPath(path);
 
     const isDirCtx = item ? item.is_dir : row.classList.contains('tree-item') || row.classList.contains('fav-item');
     document.getElementById('ctxDownloadItem').style.display = (!item || isDirCtx) ? 'none' : '';
@@ -932,7 +1107,7 @@ document.addEventListener('mousedown', (e) => {
 function ctxOpen() {
     hideCtx();
     if (!ctxTargetPath) return;
-    const item = items.find(i => i.path === ctxTargetPath);
+    const item = findItemByPath(ctxTargetPath);
     if (item) openItem(item.path, item.is_dir);
     else location.href = '/explorer/view?path=' + encodeURIComponent(ctxTargetPath);
 }
@@ -967,7 +1142,7 @@ function ctxCopyPath() {
 
 // ── PROPERTIES MODAL ──
 async function showProperties(path) {
-    const item = items.find(i => i.path === path);
+    const item = findItemByPath(path);
     const overlay = document.getElementById('propOverlay');
     const iconEl = document.getElementById('propIcon');
     const nameEl = document.getElementById('propName');
@@ -1081,7 +1256,7 @@ async function ctxDelete() {
 async function ctxRename() {
     hideCtx();
     if (!ctxTargetPath) return;
-    const item = items.find(i => i.path === ctxTargetPath);
+    const item = findItemByPath(ctxTargetPath);
     if (!item) return;
     const newName = await openPrompt({ title: '이름 바꾸기', label: '새 이름', value: item.name, okLabel: '변경' });
     if (!newName || newName === item.name) return;
@@ -1654,6 +1829,19 @@ document.addEventListener('keydown', (e) => {
     const ctrl = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
 
+    if (!ctrl && !e.altKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+        const dir = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' }[e.key];
+        moveSelection(dir);
+        return;
+    }
+    if (!ctrl && !e.altKey && e.key === ' ' && selectedPath) {
+        e.preventDefault();
+        const item = findItemByPath(selectedPath);
+        if (item && !item.is_dir) openFullscreen();
+        return;
+    }
+
     if (ctrl && key === 'a') { e.preventDefault(); selectAllItems(); return; }
     if (ctrl && key === 'f') { e.preventDefault(); document.querySelector('.search-box')?.focus(); return; }
     if (ctrl && key === 'd') { e.preventDefault(); ctxDuplicate(); return; }
@@ -1666,7 +1854,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Delete') { e.preventDefault(); const p = getSelectedPaths(); if (p.length) doDeleteSelected(p); return; }
     if (e.key === 'Backspace') { e.preventDefault(); navigateUp(); return; }
     if (e.key === 'Enter' && selectedPath) {
-        const item = items.find(i => i.path === selectedPath);
+        const item = findItemByPath(selectedPath);
         if (item) openItem(item.path, item.is_dir);
     }
 });
