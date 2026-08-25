@@ -237,6 +237,7 @@ window.__EXPLORER_DATA__ = {
             size_raw: {{ item.size_raw }},
             ext: {{ item.ext | tojson }},
             mtime: {{ item.mtime }},
+            score: {{ item.score if item.score is defined else 0 }},
             child_count: {{ item.child_count if item.child_count is defined else 'null' }}
         },
         {% endfor %}

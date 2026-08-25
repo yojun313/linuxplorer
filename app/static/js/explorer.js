@@ -199,9 +199,11 @@ function sortBy(key) {
 
 function sortedItems() {
     return [...items].sort((a, b) => {
-        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+        // 관련도순은 검색어와 얼마나 잘 맞는지가 우선이므로 폴더/파일 구분으로 먼저 나누지 않음
+        if (sortKey !== 'relevance' && a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
         let va, vb;
         switch (sortKey) {
+            case 'relevance': va = -(a.score || 0); vb = -(b.score || 0); break;
             case 'name': va = a.name.toLowerCase(); vb = b.name.toLowerCase(); break;
             case 'date': va = a.mtime; vb = b.mtime; break;
             case 'type': va = typeLabel(a); vb = typeLabel(b); break;

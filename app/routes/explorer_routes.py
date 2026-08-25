@@ -9,6 +9,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, Request, HTTPException, Depends
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
@@ -529,14 +530,18 @@ async def search(
     path: str = None,
     page: int = 1,
     page_size: int = 200,
-    sort: str = "name",
+    sort: str = "relevance",
     order: str = "asc",
     user=Depends(require_auth),
 ):
     search_root = _safe_path(path) if path else os.path.abspath(ROOT_DIR)
     if not os.path.isdir(search_root):
         search_root = os.path.abspath(ROOT_DIR)
-    all_results = FileService.search_recursive(search_root, q) if q else []
+    if q:
+        # 디스크 전체를 훑는 무거운 작업이라 이벤트 루프를 막지 않도록 별도 스레드에서 실행
+        all_results, truncated = await run_in_threadpool(FileService.search_recursive, search_root, q)
+    else:
+        all_results, truncated = [], False
     items = []
     for item in all_results:
         if item.get("is_dir"):
@@ -561,17 +566,23 @@ async def search(
 
     reverse = order == "desc"
     key_map = {
+        # 관련도순은 파일/폴더 구분 없이 검색어와 얼마나 잘 맞는지만으로 정렬
+        "relevance": lambda x: -x.get("score", 0),
         "name": lambda x: (not x["is_dir"], x["name"].lower()),
         "date": lambda x: (not x["is_dir"], x["mtime"]),
         "size": lambda x: (not x["is_dir"], x["size_raw"]),
         "type": lambda x: (not x["is_dir"], x["type"]),
     }
-    items.sort(key=key_map.get(sort, key_map["name"]), reverse=reverse)
+    items.sort(key=key_map.get(sort, key_map["relevance"]), reverse=reverse)
 
     total = len(items)
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = max(1, min(page, total_pages))
     paged_items = items[(page - 1) * page_size : page * page_size]
+
+    folder_name = f'검색: "{q}"'
+    if truncated:
+        folder_name += " (일부 결과만 표시됨)"
 
     return templates.TemplateResponse(
         name="explorer.html",
@@ -583,7 +594,7 @@ async def search(
             "mode": "search",
             "current_path": ROOT_DIR,
             "search_root": search_root,
-            "folder_name": f'검색: "{q}"',
+            "folder_name": folder_name,
             "parent_path": None,
             "root_path": ROOT_DIR,
             "breadcrumbs": [],
