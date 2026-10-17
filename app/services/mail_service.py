@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
 def send_email(receiver: str, title: str, text: str):
     sender = os.getenv("MAIL_SENDER")
     password = os.getenv("MAIL_PASSWORD")

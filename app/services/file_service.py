@@ -1,5 +1,6 @@
 import os
 import time
+from app.services.settings_service import visible_path
 
 
 class FileService:
@@ -60,6 +61,11 @@ class FileService:
             try:
                 with os.scandir(dirpath) as it:
                     for entry in it:
+                        if time.monotonic() > deadline:
+                            truncated = True
+                            break
+                        if not visible_path(entry.path):
+                            continue
                         try:
                             is_dir = entry.is_dir(follow_symlinks=False)
                         except OSError:
@@ -74,7 +80,7 @@ class FileService:
                             if len(matches) >= collect_limit:
                                 truncated = True
                                 break
-            except (PermissionError, OSError):
+            except PermissionError, OSError:
                 continue
             if time.monotonic() > deadline:
                 truncated = True
@@ -93,8 +99,13 @@ class FileService:
                     mtime = 0
                 results.append(
                     {
-                        "name": name, "path": full, "is_dir": True,
-                        "size": "", "size_raw": 0, "mtime": mtime, "score": score,
+                        "name": name,
+                        "path": full,
+                        "is_dir": True,
+                        "size": "",
+                        "size_raw": 0,
+                        "mtime": mtime,
+                        "score": score,
                     }
                 )
             else:
@@ -106,8 +117,13 @@ class FileService:
                     size_raw, size, mtime = 0, "", 0
                 results.append(
                     {
-                        "name": name, "path": full, "is_dir": False,
-                        "size": size, "size_raw": size_raw, "mtime": mtime, "score": score,
+                        "name": name,
+                        "path": full,
+                        "is_dir": False,
+                        "size": size,
+                        "size_raw": size_raw,
+                        "mtime": mtime,
+                        "score": score,
                     }
                 )
         return results, truncated

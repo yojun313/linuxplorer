@@ -2,26 +2,51 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
 <title>{{ folder_name }} — File Explorer</title>
-<script>
-(function () {
-    var theme = localStorage.getItem('exp_theme') || 'classic';
-    var mode = localStorage.getItem('exp_mode');
-    if (!mode) mode = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
-    document.documentElement.setAttribute('data-theme', theme + '-' + mode);
-})();
-</script>
-<link href="https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;600;700&display=swap" rel="stylesheet">
+<meta name="csrf-token" content="{{ csrf_token }}">
+<meta name="theme-color" content="#0b1020">
+<link rel="icon" href="/static/favicon.svg?v=folder" type="image/svg+xml">
+<link rel="icon" href="/static/icons/favicon-32.png?v=folder" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png?v=folder" sizes="180x180">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<script src="/static/js/theme-boot.js"></script>
 <link href="/static/css/explorer.css" rel="stylesheet">
+<link href="/static/css/modern.css" rel="stylesheet">
 </head>
-<body>
+<body class="explorer-page">
+    <!-- NAV PANE -->
+    <aside class="nav-pane" id="navPane" aria-label="폴더 탐색">
+        <div class="sidebar-brand"><a class="brand" href="/explorer/view"><img class="brand-mark" src="/static/icons/icon.svg" alt="" width="36" height="36"><span class="brand-label">Linuxplorer<small>파일 탐색기</small></span></a><button class="icon-button mobile-only" id="sidebarClose" aria-label="폴더 메뉴 닫기">✕</button></div><div class="sidebar-scroll">
+        <a class="home-entry" href="/explorer/view" title="전체 파일"><span class="shortcut-icon">⌂</span> <span>전체 파일</span></a>
+        <div id="favSection" style="display:none;">
+            <div class="nav-section-label">즐겨찾기</div>
+            <div id="favList"></div>
+        </div>
+        <div class="nav-section-label">위치</div>
+        <div class="trash-entry" id="trashNavEntry" role="button" tabindex="0" title="휴지통"><span class="tree-icon">🗑️</span><span class="tree-label">휴지통</span></div>
+        <div class="nav-section-label">폴더</div>
+        <div id="navTree"></div>
+        </div>
+        <div class="sidebar-footer">
+            <div class="sidebar-root" title="{{ root_path }}"><span class="root-dot"></span><span class="sidebar-label">{{ root_path }}</span></div>
+            <div class="sidebar-footer-actions"><button class="icon-button" id="sidebarSettings" title="설정" aria-label="설정">⚙</button><button class="icon-button" id="sidebarTheme" title="테마" aria-label="테마">◐</button><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="icon-button" title="로그아웃" aria-label="로그아웃">↪</button></form><button class="icon-button desktop-only" id="sidebarCollapse" aria-label="사이드바 접기" title="사이드바 접기">«</button></div>
+        </div>
+    </aside>
+    <div class="resizer" id="navResizer"></div>
+
+
+<main class="explorer-shell">
+<header class="app-header">
+    <button class="icon-button" id="sidebarToggle" aria-label="폴더 메뉴 열기" aria-controls="navPane" aria-expanded="false">☰</button>
+    <h1 class="header-title">{{ folder_name }}</h1><span class="header-item-count">{{ total }}개 항목</span>
+    <div class="header-actions"><button class="tb-btn" id="tbTheme" aria-haspopup="true" aria-expanded="false">◐ <span>테마</span></button><button class="tb-btn" id="settingsButton" aria-haspopup="dialog">⚙ <span>설정</span></button><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="tb-btn" type="submit">로그아웃</button></form></div>
+</header>
+<button class="sidebar-scrim" id="sidebarScrim" aria-label="폴더 메뉴 닫기" hidden></button>
 
 <!-- TOOLBAR -->
-<div class="toolbar">
-    <button class="tb-btn" onclick="navigateUp()" title="위로">⬆</button>
-    <button class="tb-btn" onclick="location.reload()" title="새로고침">🔄</button>
-    <div class="tb-sep"></div>
+<div class="toolbar" role="toolbar" aria-label="파일 작업">
+    <span class="toolbar-label">보기</span>
     <button class="tb-btn" data-view="details" onclick="setView('details')" title="자세히">☰ 자세히</button>
     <button class="tb-btn" data-view="tiles" onclick="setView('tiles')" title="타일">▦ 타일</button>
     <button class="tb-btn" data-view="icons" onclick="setView('icons')" title="큰 아이콘">▩ 아이콘</button>
@@ -40,11 +65,11 @@
     <div class="tb-sep"></div>
     <button class="tb-btn" onclick="showMkdirDialog()">📁 새 폴더</button>
     <button class="tb-btn" onclick="showNewFileDialog()">📄 새 파일</button>
-    <button class="tb-btn" id="tbUpload" onclick="document.getElementById('uploadInput').click()">⬆ 업로드</button>
+    <button class="tb-btn primary-action" id="tbUpload" onclick="document.getElementById('uploadInput').click()">⬆ 업로드</button>
     <input type="file" id="uploadInput" multiple style="display:none;" onchange="handleUpload(this)">
     <button class="tb-btn" onclick="toggleHidden()">👁 숨김 파일</button>
     <div class="tb-sep"></div>
-    <button class="tb-btn" id="tbTheme" title="테마">🎨 테마</button>
+
 </div>
 
 <!-- ADDRESS BAR -->
@@ -52,7 +77,7 @@
     <div class="nav-buttons">
         <button class="nav-btn" onclick="history.back()" title="뒤로">◀</button>
         <button class="nav-btn" onclick="history.forward()" title="앞으로">▶</button>
-        <button class="nav-btn" onclick="navigateUp()" title="위로">⬆</button>
+        <button class="nav-btn" onclick="navigateUp()" title="상위 폴더" aria-label="상위 폴더">↑</button><button class="nav-btn" onclick="location.reload()" title="새로고침" aria-label="새로고침">↻</button>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbs">
         <div class="bc-crumbs">
@@ -67,28 +92,15 @@
         </div>
         <input type="text" class="bc-edit-input" id="bcEditInput">
     </div>
-    <form action="/explorer/search" method="get" class="search-form" style="display:flex; align-items:center; gap:6px;">
+    <form action="/explorer/search" method="get" class="search-form" role="search">
         <input type="hidden" name="path" id="searchPathInput" value="">
-        <input type="text" name="q" class="search-box" placeholder="검색..." value="{{ query or '' }}">
+        <input type="text" name="q" class="search-box" aria-label="파일 검색" placeholder="파일과 폴더 검색" value="{{ query or '' }}">
         <label class="search-scope-toggle"><input type="checkbox" id="searchScopeChk"> 현재 폴더만</label>
     </form>
 </div>
 
 <!-- MAIN -->
 <div class="main-layout">
-
-    <!-- NAV PANE -->
-    <div class="nav-pane" id="navPane">
-        <div id="favSection" style="display:none;">
-            <div class="nav-section-label">즐겨찾기</div>
-            <div id="favList"></div>
-        </div>
-        <div class="nav-section-label">위치</div>
-        <div class="trash-entry" id="trashNavEntry"><span class="tree-icon">🗑️</span><span class="tree-label">휴지통</span></div>
-        <div class="nav-section-label">폴더</div>
-        <div id="navTree"></div>
-    </div>
-    <div class="resizer" id="navResizer"></div>
 
     <!-- CONTENT -->
     <div class="content-pane" id="contentPane">
@@ -131,6 +143,7 @@
 
     <!-- PREVIEW PANE -->
     <div class="preview-pane hidden" id="previewPane">
+        <div class="preview-heading"><strong>미리보기</strong><button class="icon-button" onclick="togglePreview()" aria-label="미리보기 닫기">✕</button></div>
         <div id="previewContent">
             <div class="preview-empty">파일을 선택하면 미리보기가 표시됩니다</div>
         </div>
@@ -143,9 +156,17 @@
     <span id="statusSelected"></span>
 </div>
 
+<nav class="mobile-tabbar" aria-label="빠른 작업">
+    <button id="mobileFolders"><span>☰</span>폴더</button>
+    <button onclick="document.querySelector('.search-box').focus()"><span>⌕</span>검색</button>
+    <button onclick="document.getElementById('uploadInput').click()"><span>↑</span>업로드</button>
+    <button onclick="showMkdirDialog()"><span>＋</span>새 폴더</button>
+    <button id="mobileMore"><span>⋯</span>더보기</button>
+</nav>
+</main>
 <!-- FULLSCREEN MODAL -->
 <div class="fs-modal" id="fsModal">
-    <button class="fs-close" onclick="closeFullscreen()">✕</button>
+    <button class="fs-close" onclick="closeFullscreen()" aria-label="파일 닫기">✕</button>
     <div class="fs-body" id="fsBody"></div>
     <div class="fs-nav" id="fsNav" style="display:none;">
         <button class="fs-nav-btn" onclick="fsPrev()">◀ 이전</button>
@@ -211,7 +232,7 @@
 <div class="modal-overlay" id="modalOverlay"></div>
 
 <!-- 토스트 -->
-<div class="toast-stack" id="toastStack"></div>
+<div class="toast-stack" id="toastStack" role="status" aria-live="polite"></div>
 
 <script>
 window.__EXPLORER_DATA__ = {
@@ -221,6 +242,7 @@ window.__EXPLORER_DATA__ = {
     mode: {{ mode | tojson }},
     searchRoot: {{ (search_root if search_root is defined else none) | tojson }},
     total: {{ total }},
+    truncated: {{ (scan_truncated | default(false)) | tojson }},
     page: {{ page }},
     pageSize: {{ page_size }},
     totalPages: {{ total_pages }},
@@ -238,7 +260,7 @@ window.__EXPLORER_DATA__ = {
             ext: {{ item.ext | tojson }},
             mtime: {{ item.mtime }},
             score: {{ item.score if item.score is defined else 0 }},
-            child_count: {{ item.child_count if item.child_count is defined else 'null' }}
+            child_count: {{ (item.child_count if item.child_count is defined else none) | tojson }}
         },
         {% endfor %}
     ]

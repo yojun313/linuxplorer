@@ -1,48 +1,17 @@
-@import url("/static/css/explorer.css");
-
-* { margin:0; padding:0; box-sizing:border-box; }
-body {
-    font-family: 'Segoe UI', -apple-system, sans-serif;
-    background: var(--body-bg-image), var(--body-bg);
-    background-size: cover;
-    background-attachment: fixed;
-    display: flex; align-items: center; justify-content: center; height: 100vh;
-    color: var(--win-text);
-    position: relative;
-}
-.theme-toggle-corner {
-    position: fixed; top: 16px; right: 16px; display: flex; gap: 6px;
-}
-.theme-toggle-corner button {
-    border: var(--fx-panel-border); background: var(--win-content); color: var(--win-text);
-    border-radius: var(--fx-radius); padding: 6px 10px; font-size: 12px; cursor: pointer;
-    backdrop-filter: blur(var(--fx-blur));
-}
-.theme-toggle-corner button:hover { background: var(--win-hover); }
-.card {
-    background: var(--win-content); border: var(--fx-panel-border); border-radius: 12px;
-    padding: 40px 36px; width: 340px;
-    box-shadow: var(--fx-panel-shadow), 0 4px 16px rgba(0,0,0,0.08);
-    backdrop-filter: blur(var(--fx-blur)); -webkit-backdrop-filter: blur(var(--fx-blur));
-}
-.logo { font-size: 28px; text-align: center; margin-bottom: 6px; }
-.title { text-align: center; font-size: 18px; font-weight: 700; margin-bottom: 6px; color: var(--win-text); }
-.subtitle { text-align: center; font-size: 12px; color: var(--win-text-muted); margin-bottom: 24px; }
-label { font-size: 12px; color: var(--win-text-muted); display: block; margin-bottom: 4px; }
-input[type=text], input[type=password] {
-    width: 100%; padding: 9px 12px; border: var(--fx-panel-border);
-    border-radius: var(--fx-radius); font-size: 14px; outline: none; margin-bottom: 16px;
-    background: var(--win-bg); color: var(--win-text);
-}
-input:focus { border-color: var(--win-accent); }
-.error {
-    background: rgba(209,52,56,0.1); border: 1px solid rgba(209,52,56,0.4); border-radius: var(--fx-radius);
-    padding: 8px 12px; font-size: 12px; color: var(--win-danger); margin-bottom: 16px;
-}
-button[type=submit] {
-    width: 100%; padding: 10px; background: var(--win-accent); color: #fff;
-    border: none; border-radius: var(--fx-radius); font-size: 14px; cursor: pointer; font-weight: 600;
-}
-button[type=submit]:hover { filter: brightness(1.08); }
-[data-theme^="mesh"] button[type=submit] { background: linear-gradient(135deg, var(--win-accent), #845ec2); }
-[data-theme^="neu"] button[type=submit] { box-shadow: 3px 3px 7px var(--fx-shadow-dark), -3px -3px 7px var(--fx-shadow-light); }
+@import url('/static/css/explorer.css');
+@import url('/static/css/modern.css');
+body.login-page { justify-content:center; align-items:center; overflow-y:auto; padding:80px 24px; min-height:100dvh; height:auto; }
+.theme-toggle-corner { position:fixed; top:calc(20px + env(safe-area-inset-top)); right:24px; }
+.theme-toggle-corner button { min-height:44px; padding:10px 16px; border:1px solid var(--win-border); border-radius:12px; background:var(--win-toolbar); color:var(--win-text-muted); cursor:pointer; }
+.card { width:100%; max-width:420px; padding:40px; border:1px solid var(--win-border); background:var(--win-content); border-radius:24px; box-shadow:0 24px 80px #16244a18; backdrop-filter:blur(20px); }
+.logo { margin:0 auto 24px; width:56px; height:56px; font-size:38px; border-radius:17px; }
+.login-eyebrow { text-align:center; color:var(--win-accent); font-size:9px; font-weight:700; letter-spacing:2.2px; margin-bottom:10px; }
+.title { font-size:30px; letter-spacing:-1px; font-weight:750; text-align:center; }
+.subtitle { text-align:center; font-size:13px; color:var(--win-text-muted); margin:12px 0 32px; }
+label { display:block; margin-bottom:8px; font-size:12px; font-weight:600; }
+input[type=text],input[type=password] { width:100%; min-height:48px; padding:12px 14px; border:1px solid var(--win-border); border-radius:11px; background:var(--win-bg); color:var(--win-text); font-size:16px; margin-bottom:20px; }
+input::placeholder { color:var(--win-text-muted); font-size:13px; }
+button[type=submit] { display:flex; align-items:center; justify-content:space-between; width:100%; min-height:48px; margin-top:8px; padding:12px 16px; background:linear-gradient(135deg,#426cf1,#8061dc); color:white; border:0; border-radius:11px; font-weight:600; cursor:pointer; }
+.login-note { font-size:10px; color:var(--win-text-muted); text-align:center; margin-top:28px; }
+.error { padding:12px; margin:20px 0; border:1px solid var(--win-danger); border-radius:10px; color:var(--win-danger); font-size:12px; line-height:1.7; }
+@media(max-width:480px) { .card { padding:32px 24px; } }

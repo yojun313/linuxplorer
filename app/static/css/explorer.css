@@ -569,8 +569,6 @@ body {
 
 /* Responsive */
 @media (max-width: 768px) {
-    .nav-pane { display: none; }
-    .preview-pane { display: none !important; }
     .search-box { width: 140px; }
     .col-h-date, .fr-date { display: none; }
     .col-h-type, .fr-type { display: none; }

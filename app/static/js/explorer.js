@@ -6,6 +6,16 @@
 'use strict';
 
 const DATA = window.__EXPLORER_DATA__ || {};
+const mobileScreen = matchMedia('(max-width: 767px)');
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (url, options = {}) => {
+    const headers = new Headers(options.headers);
+    if (!['GET', 'HEAD', 'OPTIONS'].includes((options.method || 'GET').toUpperCase()) && new URL(url, location.href).origin === location.origin) headers.set('X-CSRF-Token', csrfToken);
+    return nativeFetch(url, { ...options, headers, signal: options.signal || AbortSignal.timeout(35000) });
+};
+let mobileMultiSelect = false;
+
 const ROOT = DATA.root;
 const CURRENT = DATA.current;
 const PARENT = DATA.parent;
@@ -20,7 +30,7 @@ let items = DATA.items || [];
 
 let currentView = localStorage.getItem('exp_view') || 'details';
 if (!['details', 'tiles', 'icons', 'column', 'gallery'].includes(currentView)) currentView = 'details';
-let previewVisible = localStorage.getItem('exp_preview') === '1';
+let previewVisible = !mobileScreen.matches && localStorage.getItem('exp_preview') === '1';
 let selectedPath = null;
 let selectedPaths = new Set();
 let sortKey = DATA.sort || 'name';
@@ -226,9 +236,9 @@ function updateSortHeaders() {
 // ── RENDER ──
 function renderFiles() {
     const sorted = sortedItems();
-    renderDetails(sorted);
-    renderTiles(sorted);
-    renderIcons(sorted);
+    if (currentView === 'details') renderDetails(sorted);
+    if (currentView === 'tiles') renderTiles(sorted);
+    if (currentView === 'icons') renderIcons(sorted);
     updateSortHeaders();
     updateStatus();
     renderPagination();
@@ -238,6 +248,7 @@ function renderFiles() {
 function renderDetails(list) {
     const el = document.getElementById('fileListDetails');
     el.innerHTML = '';
+    if (!list.length) el.innerHTML = `<div class="empty-state"><strong>${MODE === 'search' ? '검색 결과가 없습니다' : '아직 파일이 없습니다'}</strong>${MODE === 'search' ? '다른 검색어나 검색 범위를 확인하세요.' : '업로드하거나 새 폴더를 만들어 시작하세요.'}</div>`;
     list.forEach(item => {
         const row = document.createElement('div');
         row.className = 'file-row' + (selectedPaths.has(item.path) ? ' selected' : '');
@@ -245,10 +256,10 @@ function renderDetails(list) {
         row.innerHTML = `
             <div class="fr-name"><span class="file-icon">${fileIcon(item)}</span><span title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span></div>
             <div class="fr-date">${fmtDate(item.mtime)}</div>
-            <div class="fr-type">${typeLabel(item)}</div>
+            <div class="fr-type">${escapeHtml(typeLabel(item))}</div>
             <div class="fr-size">${item.is_dir ? '' : item.size}</div>
         `;
-        row.addEventListener('click', (e) => selectItem(e, item.path));
+        row.addEventListener('click', (e) => activateFile(e, item));
         row.addEventListener('dblclick', () => openItem(item.path, item.is_dir));
         addDragHandlers(row, item);
         el.appendChild(row);
@@ -258,6 +269,7 @@ function renderDetails(list) {
 function renderTiles(list) {
     const el = document.getElementById('fileListTiles');
     el.innerHTML = '';
+    if (!list.length) el.innerHTML = `<div class="empty-state"><strong>${MODE === 'search' ? '검색 결과가 없습니다' : '아직 파일이 없습니다'}</strong>${MODE === 'search' ? '다른 검색어나 검색 범위를 확인하세요.' : '업로드하거나 새 폴더를 만들어 시작하세요.'}</div>`;
     list.forEach(item => {
         const div = document.createElement('div');
         div.className = 'grid-item' + (selectedPaths.has(item.path) ? ' selected' : '');
@@ -269,7 +281,7 @@ function renderTiles(list) {
                 <span class="grid-meta">${item.is_dir ? '폴더' : item.size}</span>
             </div>
         `;
-        div.addEventListener('click', (e) => selectItem(e, item.path));
+        div.addEventListener('click', (e) => activateFile(e, item));
         div.addEventListener('dblclick', () => openItem(item.path, item.is_dir));
         addDragHandlers(div, item);
         el.appendChild(div);
@@ -279,11 +291,12 @@ function renderTiles(list) {
 function renderIcons(list) {
     const el = document.getElementById('fileListIcons');
     el.innerHTML = '';
+    if (!list.length) el.innerHTML = `<div class="empty-state"><strong>${MODE === 'search' ? '검색 결과가 없습니다' : '아직 파일이 없습니다'}</strong>${MODE === 'search' ? '다른 검색어나 검색 범위를 확인하세요.' : '업로드하거나 새 폴더를 만들어 시작하세요.'}</div>`;
     list.forEach(item => {
         const div = document.createElement('div');
         div.className = 'icon-item' + (selectedPaths.has(item.path) ? ' selected' : '');
         div.dataset.path = item.path;
-        const isImg = item.type === 'image';
+        const isImg = item.type === 'image' && item.size_raw <= 16*1024*1024;
         div.innerHTML = `
             ${isImg
                 ? `<img class="icon-thumb" src="${rawUrl(item.path)}" loading="lazy" onerror="this.outerHTML='<span class=icon-big>🖼️</span>'">`
@@ -291,7 +304,7 @@ function renderIcons(list) {
             }
             <span class="icon-label" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
         `;
-        div.addEventListener('click', (e) => selectItem(e, item.path));
+        div.addEventListener('click', (e) => activateFile(e, item));
         div.addEventListener('dblclick', () => openItem(item.path, item.is_dir));
         addDragHandlers(div, item);
         el.appendChild(div);
@@ -310,7 +323,8 @@ function setView(mode) {
     document.getElementById('fileListGallery').style.display = mode === 'gallery' ? 'flex' : 'none';
     const zoomEl = document.getElementById('zoomControl');
     if (zoomEl) zoomEl.style.display = (mode === 'tiles' || mode === 'icons') ? 'flex' : 'none';
-    document.querySelectorAll('.tb-btn[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === mode));
+    document.querySelectorAll('.tb-btn[data-view]').forEach(b => { b.classList.toggle('active', b.dataset.view === mode); b.setAttribute('aria-pressed', String(b.dataset.view === mode)); });
+    if (['details','tiles','icons'].includes(mode)) renderFiles();
     if (mode === 'column') initColumnView();
     if (mode === 'gallery') { renderGalleryFilmstrip(sortedItems()); renderGalleryMain(); }
 }
@@ -322,6 +336,11 @@ function togglePreview() {
     document.getElementById('previewPane').classList.toggle('hidden', !previewVisible);
     document.getElementById('tbPreview').classList.toggle('active', previewVisible);
     document.getElementById('previewResizer').style.display = previewVisible ? '' : 'none';
+    if (previewVisible && selectedPath) loadPreview(selectedPath);
+    if (!previewVisible) {
+        previewRequests.get('previewContent')?.abort();
+        document.getElementById('previewContent').innerHTML = '<div class="preview-empty">파일을 선택하면 미리보기가 표시됩니다</div>';
+    }
 }
 
 function selectAllItems() {
@@ -346,7 +365,7 @@ function selectedSizeLabel() {
 
 function selectItem(e, path) {
     e.stopPropagation();
-    if (e.ctrlKey || e.metaKey) {
+    if (e.ctrlKey || e.metaKey || (mobileScreen.matches && mobileMultiSelect)) {
         selectedPaths.has(path) ? selectedPaths.delete(path) : selectedPaths.add(path);
     } else if (e.shiftKey && selectedPath) {
         const sorted = sortedItems();
@@ -358,7 +377,9 @@ function selectItem(e, path) {
         selectedPaths = new Set([path]);
     }
     selectedPath = path;
-    renderFiles();
+    document.querySelectorAll('.file-row,.grid-item,.icon-item').forEach(row => {
+        row.classList.toggle('selected', selectedPaths.has(row.dataset.path));
+    });
     loadPreview(path);
     updateToolbarForSelection();
     document.getElementById('statusSelected').textContent = `선택: ${selectedPaths.size}개 ${selectedSizeLabel()}`;
@@ -609,9 +630,10 @@ function findItemByPath(path) {
 
 // 텍스트로 보이는 파일(.json/.jsonl 포함, 확장자 미분류 파일도 서버가 내용을 살짝 엿봐서 판단)의
 // 본문을 가져와 <pre> 블록으로 렌더링. 미리보기 불가능하면 null 반환.
-async function textPreviewHtml(path, ext) {
+async function textPreviewHtml(path, ext, signal) {
     try {
-        const res = await fetch('/explorer/api/file_info?path=' + encodeURIComponent(path));
+        const res = await fetch('/explorer/api/file_info?path=' + encodeURIComponent(path), {signal:signal ? AbortSignal.any([signal,AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000)});
+        if (!res.ok) return null;
         const info = await res.json();
         if (info.content == null) return null;
         let display = info.content;
@@ -621,14 +643,14 @@ async function textPreviewHtml(path, ext) {
         } else {
             display = escapeHtml(display);
         }
-        return `<div class="preview-content"><pre>${display}</pre></div>`;
+        return `<div class="preview-content">${info.content_truncated ? '<p class="preview-limit">앞부분 128KB만 표시합니다. 전체 내용은 다운로드하세요.</p>' : ''}<pre>${display}</pre></div>`;
     } catch {
         return null;
     }
 }
 
 // ── 미리보기 컴포넌트 (본문만 생성 → previewContent / colPreviewContent / galleryMainContent 어디든 재사용) ──
-async function previewHtmlFor(path) {
+async function previewHtmlFor(path, signal) {
     const item = findItemByPath(path);
     if (!item) return '<div class="preview-empty">항목을 찾을 수 없습니다</div>';
 
@@ -646,6 +668,7 @@ async function previewHtmlFor(path) {
             </div>`;
     }
 
+    if ((item.type === 'image' && item.size_raw > 16*1024*1024) || (item.ext === '.pdf' && item.size_raw > 32*1024*1024)) return largePreviewHtml(item);
     const mediaUrl = rawUrl(path);
     const dlUrl = '/explorer/download_file?path=' + encodeURIComponent(path);
 
@@ -656,18 +679,18 @@ async function previewHtmlFor(path) {
         if (isBrowserPlayable(item.ext)) {
             previewHtml = `<div class="preview-content"><video controls preload="metadata" style="max-width:100%;" src="${mediaUrl}"></video></div>`;
         } else {
-            previewHtml = `<div class="preview-empty">${item.ext} 형식은 브라우저 재생 불가<br>다운로드 후 재생해주세요</div>`;
+            previewHtml = `<div class="preview-empty">${escapeHtml(item.ext)} 형식은 브라우저 재생 불가<br>다운로드 후 재생해주세요</div>`;
         }
     } else if (item.type === 'audio') {
         previewHtml = `<div class="preview-content" style="padding:24px;"><audio controls preload="metadata" style="width:100%;" src="${mediaUrl}"></audio></div>`;
     } else if (item.type === 'text') {
-        previewHtml = (await textPreviewHtml(path, item.ext)) || `<div class="preview-empty">미리보기 불가</div>`;
+        previewHtml = (await textPreviewHtml(path, item.ext, signal)) || `<div class="preview-empty">미리보기 불가</div>`;
     } else if (item.type === 'document' && item.ext === '.pdf') {
         previewHtml = `<div class="preview-content"><iframe src="${mediaUrl}" style="width:100%;height:100%;border:none;flex:1;"></iframe></div>`;
     } else {
         // 확장자로는 분류되지 않았지만 실제로는 텍스트일 수 있는 파일까지 폭넓게 지원
         // (서버가 파일 앞부분을 살짝 읽어 텍스트 여부를 판단함)
-        previewHtml = (await textPreviewHtml(path, item.ext)) || `<div class="preview-empty">${item.ext || ''} 파일은 미리보기를 지원하지 않습니다</div>`;
+        previewHtml = (await textPreviewHtml(path, item.ext, signal)) || `<div class="preview-empty">${escapeHtml(item.ext || '')} 파일은 미리보기를 지원하지 않습니다</div>`;
     }
 
     return `
@@ -677,7 +700,7 @@ async function previewHtmlFor(path) {
         </div>
         ${previewHtml}
         <div class="preview-meta">
-            <div class="preview-meta-row"><span>유형</span><span>${typeLabel(item)}</span></div>
+            <div class="preview-meta-row"><span>유형</span><span>${escapeHtml(typeLabel(item))}</span></div>
             <div class="preview-meta-row"><span>크기</span><span>${item.size}</span></div>
             <div class="preview-meta-row"><span>수정</span><span>${fmtDate(item.mtime)}</span></div>
         </div>
@@ -687,14 +710,23 @@ async function previewHtmlFor(path) {
         </div>`;
 }
 
+const previewRequests = new Map();
+function largePreviewHtml(item) {
+    return `<div class="preview-empty"><strong>${escapeHtml(item.name)}</strong><p>큰 파일 (${escapeHtml(item.size)})은 다운로드해서 열어주세요.</p><a class="pv-btn primary" href="/explorer/download_file?path=${encodeURIComponent(item.path)}">다운로드</a></div>`;
+}
 async function loadPreview(path) {
-    const content = document.getElementById('previewContent');
-    content.innerHTML = await previewHtmlFor(path);
+    if (!previewVisible) return;
+    await loadPreviewInto(path, 'previewContent');
 }
 async function loadPreviewInto(path, targetId) {
+    previewRequests.get(targetId)?.abort();
+    const controller = new AbortController();
+    previewRequests.set(targetId,controller);
     const el = document.getElementById(targetId);
     if (!el) return;
-    el.innerHTML = await previewHtmlFor(path);
+    el.innerHTML = '<div class="preview-empty">불러오는 중…</div>';
+    const html = await previewHtmlFor(path,controller.signal);
+    if (!controller.signal.aborted && el.isConnected) el.innerHTML = html;
 }
 
 // ── NAV TREE ──
@@ -704,12 +736,13 @@ async function buildNavTree() {
     const root = createTreeNode({ name: 'Root', path: ROOT, is_dir: true }, 0);
     tree.appendChild(root);
 
+    await expandTreeNode(ROOT);
     const rel = CURRENT.startsWith(ROOT) ? CURRENT.slice(ROOT.length) : '';
     if (rel) {
         const parts = rel.split('/').filter(Boolean);
         let cur = ROOT;
         for (const p of parts) {
-            cur += '/' + p;
+            cur = joinPath(cur, p);
             await expandTreeNode(cur);
         }
     } else {
@@ -727,7 +760,10 @@ function createTreeNode(item, depth) {
     row.style.paddingLeft = (8 + depth * 16) + 'px';
     row.dataset.path = item.path;
 
-    const toggle = document.createElement('span');
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-label', item.name + ' 하위 폴더 펼치기');
+    toggle.setAttribute('aria-expanded', 'false');
     toggle.className = 'tree-toggle';
     toggle.textContent = '▶';
     toggle.onclick = (e) => { e.stopPropagation(); toggleTreeExpand(item.path, div, depth); };
@@ -743,6 +779,9 @@ function createTreeNode(item, depth) {
     row.appendChild(toggle);
     row.appendChild(icon);
     row.appendChild(label);
+    row.setAttribute('role', 'link');
+    row.tabIndex = 0;
+    row.addEventListener('keydown', e => { if (e.key === 'Enter') row.click(); });
     row.onclick = () => { location.href = '/explorer/view?path=' + encodeURIComponent(item.path); };
 
     row.addEventListener('dragover', (e) => {
@@ -783,15 +822,17 @@ async function toggleTreeExpand(path, container, depth) {
     if (children.classList.contains('open')) {
         children.classList.remove('open');
         toggle.textContent = '▶';
+        toggle.setAttribute('aria-expanded','false');
         return;
     }
     await loadChildren(path, children, depth);
     children.classList.add('open');
     toggle.textContent = '▼';
+    toggle.setAttribute('aria-expanded','true');
 }
 
 async function expandTreeNode(path) {
-    const container = document.querySelector(`[data-path="${CSS.escape(path)}"]`);
+    const container = document.querySelector(`#navTree .tree-item[data-path="${CSS.escape(path)}"]`)?.parentElement;
     if (!container) return;
     const children = container.querySelector('.tree-children');
     const toggle = container.querySelector('.tree-toggle');
@@ -799,13 +840,14 @@ async function expandTreeNode(path) {
     const depth = Math.round((parseInt(container.querySelector('.tree-item')?.style.paddingLeft) - 8) / 16);
     await loadChildren(path, children, depth);
     children.classList.add('open');
-    if (toggle) toggle.textContent = '▼';
+    if (toggle) { toggle.textContent = '▼'; toggle.setAttribute('aria-expanded','true'); }
 }
 
 async function loadChildren(path, childrenEl, depth) {
     if (childrenEl.children.length > 0) return;
     try {
-        const res = await fetch('/explorer/api/list?path=' + encodeURIComponent(path));
+        const res = await fetch('/explorer/api/list?directories_only=true&page_size=2000&path=' + encodeURIComponent(path));
+        if (!res.ok) throw new Error('폴더를 불러올 수 없습니다.');
         const data = await res.json();
         const dirs = data.items.filter(i => i.is_dir);
         dirs.forEach(d => childrenEl.appendChild(createTreeNode(d, depth + 1)));
@@ -813,7 +855,7 @@ async function loadChildren(path, childrenEl, depth) {
             const toggle = childrenEl.parentElement.querySelector('.tree-toggle');
             if (toggle) toggle.style.visibility = 'hidden';
         }
-    } catch {}
+    } catch (error) { showToast(error.message, 'error'); }
 }
 
 function highlightTreeNode(path) {
@@ -887,6 +929,7 @@ function renderFavorites() {
 let fsItems = [];
 let fsIndex = 0;
 let fsAutoInterval = null;
+let fsRequest;
 
 function openFullscreen() {
     if (!selectedPath) return;
@@ -911,11 +954,16 @@ function openFullscreen() {
 }
 
 function renderFullscreen() {
+    fsRequest?.abort();
+    fsRequest = new AbortController();
+    const signal = fsRequest.signal;
     const item = fsItems[fsIndex];
     const body = document.getElementById('fsBody');
     const url = rawUrl(item.path);
 
-    if (item.type === 'image') {
+    if ((item.type === 'image' && item.size_raw > 16*1024*1024) || (item.ext === '.pdf' && item.size_raw > 32*1024*1024)) {
+        body.innerHTML = largePreviewHtml(item);
+    } else if (item.type === 'image') {
         body.innerHTML = `<img src="${url}">`;
     } else if (item.type === 'video') {
         if (isBrowserPlayable(item.ext)) {
@@ -923,7 +971,7 @@ function renderFullscreen() {
         } else {
             body.innerHTML = `<div style="color:#fff;text-align:center;padding:40px;">
                 <p style="font-size:1.1rem;margin-bottom:8px;">🎬 ${escapeHtml(item.name)}</p>
-                <p style="color:#999;margin-bottom:20px;">${item.ext} 형식은 브라우저에서 재생할 수 없습니다.<br>다운로드 후 VLC 등으로 재생해주세요.</p>
+                <p style="color:#999;margin-bottom:20px;">${escapeHtml(item.ext)} 형식은 브라우저에서 재생할 수 없습니다.<br>다운로드 후 VLC 등으로 재생해주세요.</p>
                 <a href="/explorer/download_file?path=${encodeURIComponent(item.path)}"
                    style="color:#fff;background:var(--win-accent);padding:10px 24px;border-radius:6px;text-decoration:none;">다운로드</a>
             </div>`;
@@ -932,21 +980,12 @@ function renderFullscreen() {
         body.innerHTML = `<audio controls autoplay preload="metadata" style="min-width:300px;" src="${url}"></audio>`;
     } else if (item.type === 'document' && item.ext === '.pdf') {
         body.innerHTML = `<iframe src="${url}" style="width:90vw;height:85vh;border:none;border-radius:8px;"></iframe>`;
-    } else if (item.type === 'text') {
-        fetch(url).then(r => r.text()).then(text => {
-            let display;
-            if (item.ext === '.json') {
-                try { display = syntaxHL(JSON.stringify(JSON.parse(text), null, 2)); }
-                catch { display = escapeHtml(text); }
-            } else { display = escapeHtml(text); }
-            body.innerHTML = `<pre>${display}</pre>`;
-        }).catch(() => { body.innerHTML = '<pre>불러오기 실패</pre>'; });
     } else {
         // 확장자로는 분류되지 않았지만 실제로는 텍스트일 수 있는 파일까지 폭넓게 지원
         // (서버가 파일 앞부분을 살짝 읽어 텍스트 여부를 판단함)
         body.innerHTML = `<div style="color:#fff;text-align:center;padding:40px;">불러오는 중...</div>`;
-        textPreviewHtml(item.path, item.ext).then(html => {
-            if (fsItems[fsIndex] !== item) return; // 그 사이 다른 파일로 넘어갔으면 무시
+        textPreviewHtml(item.path, item.ext, signal).then(html => {
+            if (signal.aborted || fsItems[fsIndex] !== item || !document.getElementById('fsModal').classList.contains('open')) return; // 그 사이 다른 파일로 넘어갔으면 무시
             if (html) {
                 body.innerHTML = html;
             } else {
@@ -964,6 +1003,8 @@ function renderFullscreen() {
 }
 
 function closeFullscreen() {
+    fsRequest?.abort();
+    document.getElementById('fsBody').innerHTML = '';
     document.getElementById('fsModal').classList.remove('open');
     document.body.style.overflow = '';
     fsStopAuto();
@@ -993,7 +1034,7 @@ function updateStatus() {
     const parts = [];
     if (dirs) parts.push(dirs + '개 폴더');
     if (files) parts.push(files + '개 파일');
-    document.getElementById('statusCount').textContent = parts.join(', ') || '비어 있음';
+    document.getElementById('statusCount').textContent = (parts.join(', ') || '비어 있음') + (DATA.truncated ? ' · 일부 목록만 표시됩니다. 검색으로 나머지 파일을 찾으세요.' : '');
 }
 
 // ── RESIZER ──
@@ -1166,10 +1207,10 @@ async function showProperties(path) {
         rows += propRow('크기', '<span class="prop-size-loading" id="propSizeVal">⏳ 계산 중...</span>');
         if (item && item.child_count != null) rows += propRow('포함 항목', item.child_count + '개');
     } else {
-        rows += propRow('유형', typeLabel(item));
+        rows += propRow('유형', escapeHtml(typeLabel(item)));
         rows += propRow('크기', item.size + ' (' + item.size_raw.toLocaleString() + ' bytes)');
         rows += propRow('수정 날짜', fmtDate(item.mtime));
-        if (item.ext) rows += propRow('확장자', item.ext);
+        if (item.ext) rows += propRow('확장자', escapeHtml(item.ext));
     }
 
     body.innerHTML = rows;
@@ -1428,12 +1469,14 @@ function initZoom() {
 const THEME_KEY = 'exp_theme';
 const MODE_KEY = 'exp_mode';
 const THEMES = [
+    { id: 'aurora', name: '오로라', swatchLight: 'linear-gradient(135deg,#4278fa,#9665ec)', swatchDark: 'linear-gradient(135deg,#4278fa,#9665ec)' },
     { id: 'classic', name: '기본', swatchLight: '#0078d4', swatchDark: '#4da3ff' },
     { id: 'glass', name: '글래스모피즘', swatchLight: '#6c63ff', swatchDark: '#8b7bff' },
-    { id: 'neu', name: '뉴모피즘', swatchLight: '#5b7fff', swatchDark: '#7c9eff' },
+    { id: 'neu', name: '소프트', swatchLight: '#5b7fff', swatchDark: '#7c9eff' },
+    { id: 'mono', name: '미니멀', swatchLight: '#64748b', swatchDark: '#94a3b8' },
     { id: 'mesh', name: '그라디언트 메시', swatchLight: '#ff6b6b', swatchDark: '#ff7b7b' },
 ];
-function currentTheme() { return localStorage.getItem(THEME_KEY) || 'classic'; }
+function currentTheme() { return localStorage.getItem(THEME_KEY) || 'aurora'; }
 function currentMode() {
     let m = localStorage.getItem(MODE_KEY);
     if (!m) m = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
@@ -1443,15 +1486,19 @@ function applyTheme(theme, mode) {
     document.documentElement.setAttribute('data-theme', `${theme}-${mode}`);
     localStorage.setItem(THEME_KEY, theme);
     localStorage.setItem(MODE_KEY, mode);
+    document.documentElement.style.colorScheme = mode;
+    document.querySelector('meta[name="theme-color"]').content = mode === 'dark' ? '#0b1020' : '#f0f3fa';
 }
-function closeThemeMenu() { document.getElementById('themeMenu')?.classList.remove('open'); }
+function closeThemeMenu() { document.getElementById('themeMenu')?.classList.remove('open'); document.getElementById('tbTheme')?.setAttribute('aria-expanded', 'false'); }
 function renderThemeMenu() {
     const menu = document.getElementById('themeMenu');
     if (!menu) return;
     const theme = currentTheme(), mode = currentMode();
     menu.innerHTML = `<div class="theme-menu-label">테마</div>`;
     THEMES.forEach(t => {
-        const div = document.createElement('div');
+        const div = document.createElement('button');
+        div.type = 'button';
+        div.setAttribute('aria-pressed', String(t.id === theme));
         div.className = 'theme-option' + (t.id === theme ? ' active' : '');
         div.innerHTML = `<span class="theme-swatch" style="background:${mode === 'dark' ? t.swatchDark : t.swatchLight}"></span><span>${escapeHtml(t.name)}</span>`;
         div.addEventListener('click', () => { applyTheme(t.id, mode); renderThemeMenu(); });
@@ -1479,9 +1526,10 @@ function initThemeMenu() {
         closeThemeMenu();
         if (!wasOpen) {
             const r = btn.getBoundingClientRect();
-            menu.style.left = Math.min(r.left, window.innerWidth - 240) + 'px';
+            menu.style.left = Math.min(r.left, window.innerWidth - 292) + 'px';
             menu.style.top = (r.bottom + 4) + 'px';
             menu.classList.add('open');
+            btn.setAttribute('aria-expanded', 'true');
         }
     });
     document.addEventListener('mousedown', (e) => {
@@ -1653,7 +1701,7 @@ function renderGalleryFilmstrip(sorted) {
         const thumb = document.createElement('div');
         thumb.className = 'gallery-thumb' + (item.path === selectedPath ? ' selected' : '');
         thumb.title = item.name;
-        if (item.type === 'image') {
+        if (item.type === 'image' && item.size_raw <= 16*1024*1024) {
             thumb.innerHTML = `<img src="${rawUrl(item.path)}" loading="lazy" onerror="this.parentElement.textContent='${fileIcon(item)}'">`;
         } else {
             thumb.textContent = fileIcon(item);
@@ -1679,7 +1727,7 @@ async function renderGalleryMain() {
         selectedPath = path;
         selectedPaths = new Set([path]);
     }
-    main.innerHTML = await previewHtmlFor(path);
+    await loadPreviewInto(path, 'galleryMainContent');
 }
 
 // ── 선택 드래그(러버밴드) ──
@@ -1810,6 +1858,7 @@ document.addEventListener('keydown', (e) => {
     const themeMenuOpen = document.getElementById('themeMenu')?.classList.contains('open');
 
     if (e.key === 'Escape') {
+        if (document.body.classList.contains('sidebar-open')) { setSidebarOpen(false); return; }
         if (modalOpen) return;
         if (propOpen) { closeProp(); return; }
         if (fsOpen) { closeFullscreen(); return; }
@@ -1825,7 +1874,7 @@ document.addEventListener('keydown', (e) => {
         if (e.key === ' ') { e.preventDefault(); fsToggleAuto(); }
         return;
     }
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
     if (document.getElementById('trashView').style.display === 'flex') return;
 
     const ctrl = e.ctrlKey || e.metaKey;
@@ -1929,6 +1978,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initOsFileDrop();
     initZoom();
     initThemeMenu();
+    initModernUI();
     initAddressBarEdit();
     initSearchScope();
 
@@ -1936,6 +1986,159 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('trashBackBtn')?.addEventListener('click', exitTrashMode);
     document.getElementById('trashEmptyBtn')?.addEventListener('click', emptyTrash);
 });
+
+
+function activateFile(e, item) {
+    selectItem(e, item.path);
+    if (mobileScreen.matches && !mobileMultiSelect) openItem(item.path, item.is_dir);
+}
+
+function setSidebarOpen(open) {
+    document.body.classList.toggle('sidebar-open', open);
+    document.getElementById('sidebarScrim').hidden = !open;
+    document.getElementById('sidebarToggle').setAttribute('aria-expanded', String(open));
+    if (open) document.getElementById('sidebarClose').focus();
+    else document.getElementById('sidebarToggle').focus();
+}
+
+async function openSettings() {
+    closeThemeMenu();
+    const overlay = document.getElementById('modalOverlay');
+    overlay.innerHTML = `<div class="modal-dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <div class="modal-header" id="settingsTitle">작업 공간 설정</div>
+        <form id="settingsForm">
+        <div class="modal-body">
+            <section class="settings-section"><h3>탐색 루트 디렉토리</h3><p>이 경로를 파일 탐색의 시작점으로 사용합니다. 저장하면 새 루트로 이동하며, 서버를 재시작해도 유지됩니다.</p><label for="settingRoot">서버의 절대 경로</label><input type="text" id="settingRoot" required placeholder="/home/username" value="${escapeHtml(ROOT)}"><p>로그인한 관리자에게 적용되는 서버 공통 설정입니다. 보호된 시스템 경로와 인증 정보에는 접근할 수 없습니다.</p></section>
+            <section class="settings-section"><h3>화면과 테마</h3><label for="settingTheme">테마</label><select id="settingTheme">${THEMES.map(t => `<option value="${t.id}" ${t.id === currentTheme() ? 'selected' : ''}>${t.name}</option>`).join('')}</select><label for="settingMode">화면 모드</label><select id="settingMode"><option value="light" ${currentMode() === 'light' ? 'selected' : ''}>라이트</option><option value="dark" ${currentMode() === 'dark' ? 'selected' : ''}>다크</option></select></section>
+            <section class="settings-section"><h3>파일 탐색</h3><label for="settingView">기본 보기</label><select id="settingView">${[['details','자세히'],['tiles','타일'],['icons','큰 아이콘'],['column','계층'],['gallery','갤러리']].map(([v,l]) => `<option value="${v}" ${v === currentView ? 'selected' : ''}>${l}</option>`).join('')}</select><label class="settings-toggle" for="settingCompact">촘촘한 목록 (데스크톱)<input type="checkbox" id="settingCompact" ${document.body.classList.contains('compact') ? 'checked' : ''}></label><label class="settings-toggle" for="settingPreview">미리보기 패널 (데스크톱)<input type="checkbox" id="settingPreview" ${localStorage.getItem('exp_preview') === '1' ? 'checked' : ''}></label><label class="settings-toggle" for="settingMulti">여러 파일 선택 (모바일)<input type="checkbox" id="settingMulti" ${mobileMultiSelect ? 'checked' : ''}></label></section>
+            <div class="settings-error" id="settingsError" role="alert"></div>
+        </div>
+        <div class="modal-footer"><button type="button" class="modal-btn" id="settingsCancel">취소</button><button type="submit" class="modal-btn primary" id="settingsSave">설정 저장</button></div>
+        </form></div>`;
+    overlay.classList.add('open');
+    const close = () => { overlay.classList.remove('open'); overlay.innerHTML = ''; };
+    document.getElementById('settingsCancel').onclick = close;
+    overlay.onclick = e => { if (e.target === overlay) close(); };
+    overlay.querySelector('#settingRoot').focus();
+    const rootInput = document.getElementById('settingRoot');
+    let initialRoot = ROOT;
+    const saveButton = document.getElementById('settingsSave');
+    saveButton.disabled = true;
+    try {
+        const response = await fetch('/api/settings');
+        if (!response.ok) throw new Error('서버 설정을 불러올 수 없습니다. 다시 로그인하세요.');
+        const settings = await response.json();
+        initialRoot = settings.root;
+        rootInput.value = settings.root;
+        saveButton.disabled = false;
+    } catch (error) {
+        if (!rootInput.isConnected) return;
+        document.getElementById('settingsError').textContent = error.message;
+        return;
+    }
+    if (!rootInput.isConnected) return;
+    document.getElementById('settingsForm').onsubmit = async e => {
+        e.preventDefault();
+        const button = document.getElementById('settingsSave');
+        button.disabled = true; button.textContent = '저장 중…';
+        const newRoot = rootInput.value.trim();
+        try {
+            if (newRoot !== initialRoot) await apiFetch('/api/settings', {root:newRoot}, 'PUT');
+            applyTheme(document.getElementById('settingTheme').value, document.getElementById('settingMode').value);
+            setView(document.getElementById('settingView').value);
+            const compact = document.getElementById('settingCompact').checked;
+            document.body.classList.toggle('compact', compact);
+            localStorage.setItem('exp_compact', compact ? '1' : '0');
+            const preview = document.getElementById('settingPreview').checked;
+            localStorage.setItem('exp_preview', preview ? '1' : '0');
+            if (!mobileScreen.matches && preview !== previewVisible) togglePreview();
+            mobileMultiSelect = document.getElementById('settingMulti').checked;
+            localStorage.setItem('exp_multi', mobileMultiSelect ? '1' : '0');
+            close(); renderThemeMenu(); showToast('설정을 저장했습니다.', 'success');
+            if (newRoot !== initialRoot) location.href = '/explorer/view';
+        } catch (error) {
+            document.getElementById('settingsError').textContent = error.message;
+            button.disabled = false; button.textContent = '설정 저장';
+        }
+    };
+}
+
+function initModernUI() {
+    document.body.classList.toggle('compact', localStorage.getItem('exp_compact') === '1');
+    mobileMultiSelect = localStorage.getItem('exp_multi') === '1';
+    const toggle = () => {
+        if (mobileScreen.matches) setSidebarOpen(!document.body.classList.contains('sidebar-open'));
+        else setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed'));
+    };
+    const setSidebarCollapsed = collapsed => {
+        document.body.classList.toggle('sidebar-collapsed', collapsed);
+        document.getElementById('navPane').style.width = '';
+        localStorage.setItem('exp_sidebar', collapsed ? '1' : '0');
+        document.getElementById('sidebarCollapse').textContent = collapsed ? '»' : '«';
+        document.getElementById('sidebarCollapse').setAttribute('aria-label', collapsed ? '사이드바 펼치기' : '사이드바 접기');
+        document.getElementById('sidebarToggle').setAttribute('aria-expanded', String(!collapsed));
+    };
+    setSidebarCollapsed(localStorage.getItem('exp_sidebar') === '1');
+    document.getElementById('sidebarCollapse').onclick = toggle;
+    document.getElementById('sidebarSettings').onclick = () => { setSidebarOpen(false); openSettings(); };
+    document.getElementById('sidebarTheme').onclick = () => { setSidebarOpen(false); document.getElementById('tbTheme').click(); };
+    document.getElementById('sidebarToggle').onclick = toggle;
+    document.getElementById('mobileFolders').onclick = toggle;
+    document.getElementById('sidebarClose').onclick = () => setSidebarOpen(false);
+    document.getElementById('sidebarScrim').onclick = () => setSidebarOpen(false);
+    document.getElementById('settingsButton').onclick = openSettings;
+    document.getElementById('mobileMore').onclick = e => {
+        hideCtx(); hideCtxEmpty();
+        if (selectedPath) showItemContextMenu(e, {dataset:{path:selectedPath}});
+        else showEmptyContextMenu(e);
+    };
+    document.getElementById('trashNavEntry').addEventListener('click', () => setSidebarOpen(false));
+    mobileScreen.addEventListener('change', () => { setSidebarOpen(false); if (previewVisible && mobileScreen.matches) togglePreview(); });
+    // A visible action replaces right-click on touch devices.
+    const addActions = () => document.querySelectorAll('.file-row,.grid-item,.icon-item').forEach(row => {
+        row.tabIndex = 0;
+        if (row.querySelector('.file-more')) return;
+        const button = document.createElement('button');
+        button.type = 'button'; button.className = 'file-more'; button.textContent = '⋯';
+        button.setAttribute('aria-label', '파일 작업 메뉴');
+        button.onclick = e => { e.stopPropagation(); selectItem(e, row.dataset.path); hideCtx(); hideCtxEmpty(); showItemContextMenu(e, row); };
+        row.appendChild(button);
+    });
+    addActions();
+    new MutationObserver(addActions).observe(document.getElementById('contentPane'), {childList:true, subtree:true});
+    let pressed, timer, start;
+    function release() { clearTimeout(timer); pressed?.classList.remove('is-pressed'); pressed = null; }
+    document.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        release(); pressed = e.target.closest('button,a,.file-row,.grid-item,.icon-item');
+        if (!pressed || pressed.disabled) return;
+        start = {x:e.clientX,y:e.clientY};
+        timer = setTimeout(() => pressed?.classList.add('is-pressed'), pressed.matches('.file-row,.grid-item,.icon-item') ? 60 : 0);
+    }, {passive:true});
+    document.addEventListener('pointermove', e => { if (pressed && Math.hypot(e.clientX-start.x,e.clientY-start.y)>10) release(); }, {passive:true});
+    document.addEventListener('pointerup', release, {passive:true});
+    document.addEventListener('pointercancel', release, {passive:true});
+    document.addEventListener('scroll', release, {passive:true,capture:true});
+    document.addEventListener('touchstart', () => {}, {passive:true});
+    // Shared dialogs trap focus and return it to their trigger.
+    const overlay = document.getElementById('modalOverlay');
+    let previousFocus;
+    new MutationObserver(() => {
+        if (overlay.classList.contains('open')) {
+            const dialog = overlay.querySelector('.modal-dialog');
+            if (dialog && !dialog.hasAttribute('role')) { dialog.setAttribute('role','dialog'); dialog.setAttribute('aria-modal','true'); dialog.setAttribute('aria-label',dialog.querySelector('.modal-header').textContent); }
+            if (!previousFocus) previousFocus = document.activeElement.closest('#modalOverlay') ? document.getElementById('settingsButton') : document.activeElement;
+        } else { previousFocus?.focus(); previousFocus = null; }
+    }).observe(overlay, {attributes:true,attributeFilter:['class']});
+    overlay.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.preventDefault(); overlay.querySelector('[data-act="cancel"],#settingsCancel')?.click(); }
+        if (e.key !== 'Tab') return;
+        const controls = [...overlay.querySelectorAll('button:not(:disabled),input,select,a[href]')];
+        const first = controls[0], last = controls[controls.length-1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+        if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    });
+}
 
 // ── 외부(인라인 onclick)에서 쓰는 함수들을 전역으로 노출 ──
 window.__lx = {

@@ -1,0 +1,16 @@
+{
+  "name": "Linuxplorer",
+  "short_name": "Linuxplorer",
+  "description": "파일 탐색과 관리를 한곳에서",
+  "id": "/",
+  "start_url": "/explorer/view",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "lang": "ko",
+  "icons": [
+    {"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/static/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}

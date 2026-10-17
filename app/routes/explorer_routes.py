@@ -1,4 +1,5 @@
 import json
+import aiofiles
 import mimetypes
 import os
 import re
@@ -15,6 +16,19 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.responses import RedirectResponse
 from app.services.file_service import FileService
+from app.services.job_service import run_file_job
+from app.services.io_service import (
+    file_io,
+    search_io,
+    pooled,
+    SEARCH_POOL,
+    STREAM_POOL,
+    UPLOAD_POOL,
+    search_slots,
+    stream_slots,
+    upload_slots,
+)
+from app.services.settings_service import get_root, safe_path, visible_path
 from app.routes.auth_routes import get_current_user
 from fastapi import UploadFile, File as FastAPIFile
 from pydantic import BaseModel
@@ -60,17 +74,21 @@ class TrashRestoreBody(BaseModel):
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
-ROOT_DIR = os.getenv("ROOT_DIR", "/")
 
 # ── 휴지통 ──
 TRASH_DIRNAME = ".trash"
-TRASH_DIR = os.path.join(os.path.abspath(ROOT_DIR), TRASH_DIRNAME)
+
+
+def _trash_root():
+    return safe_path(os.path.join(get_root(), TRASH_DIRNAME), allow_trash=True)
+
+
 _trash_meta_lock = threading.Lock()
 
 
 def _trash_dir() -> str:
-    os.makedirs(TRASH_DIR, exist_ok=True)
-    return TRASH_DIR
+    os.makedirs(_trash_root(), exist_ok=True)
+    return _trash_root()
 
 
 def _trash_meta_path() -> str:
@@ -81,7 +99,7 @@ def _load_trash_meta() -> dict:
     try:
         with open(_trash_meta_path(), "r", encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError, json.JSONDecodeError:
         return {}
 
 
@@ -104,6 +122,7 @@ def _next_available_name(path: str, label: str = "사본") -> str:
         if not os.path.exists(candidate):
             return candidate
         n += 1
+
 
 EXT_MAP = {
     "image": (
@@ -296,27 +315,13 @@ def guess_media_type(path: str) -> str:
 def require_auth(request: Request):
     user = get_current_user(request)
     if not user:
-        raise HTTPException(status_code=302, headers={"Location": "/login"})
+        if request.url.path.endswith(("/view", "/search")):
+            raise HTTPException(status_code=302, headers={"Location": "/login"})
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     return user
 
 
 # ── 유틸 ──
-def get_dir_size(path: str) -> int:
-    total = 0
-    try:
-        for entry in os.scandir(path):
-            try:
-                if entry.path == TRASH_DIR:
-                    continue
-                if entry.is_dir(follow_symlinks=False):
-                    total += get_dir_size(entry.path)
-                else:
-                    total += entry.stat().st_size
-            except (PermissionError, OSError):
-                continue
-    except (PermissionError, OSError):
-        pass
-    return total
 
 
 def classify_file(ext: str, name: str = "") -> str:
@@ -361,10 +366,7 @@ def build_file_info(entry_or_path, is_scandir=True):
         mtime = stat.st_mtime
 
     if is_dir:
-        try:
-            child_count = len(list(os.scandir(path)))
-        except PermissionError:
-            child_count = 0
+        child_count = None
         return {
             "name": name,
             "path": path,
@@ -391,12 +393,7 @@ def build_file_info(entry_or_path, is_scandir=True):
 
 
 def _safe_path(path: str) -> str:
-    """ROOT_DIR 밖으로 나가는 경로 차단"""
-    abs_path = os.path.abspath(path)
-    abs_root = os.path.abspath(ROOT_DIR)
-    if abs_path != abs_root and not abs_path.startswith(abs_root + os.sep):
-        raise HTTPException(status_code=403, detail="Access denied")
-    return abs_path
+    return safe_path(path)
 
 
 def _raise_fs_error(e: Exception):
@@ -414,69 +411,53 @@ def _raise_fs_error(e: Exception):
             status_code=409, detail=f"이미 존재합니다: {e.filename or ''}"
         ) from e
     if isinstance(e, OSError):
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="파일 작업에 실패했습니다.") from e
     raise
 
 
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)")
-READ_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
-MAX_RANGE_CHUNK = 32 * 1024 * 1024  # 한 응답 최대 32MB (열린 범위 요청 방어용)
-MAX_CONCURRENT_READS_PER_FILE = 2
-
-_file_semaphores: dict[str, threading.Semaphore] = {}
-_file_semaphores_lock = threading.Lock()
+MAX_RANGE_CHUNK = 2 * 1024 * 1024  # 한 응답 최대 32MB (열린 범위 요청 방어용)
 
 
-def _get_file_semaphore(path: str) -> threading.Semaphore:
-    with _file_semaphores_lock:
-        sem = _file_semaphores.get(path)
-        if sem is None:
-            sem = threading.Semaphore(MAX_CONCURRENT_READS_PER_FILE)
-            _file_semaphores[path] = sem
-        return sem
+async def _iter_file_range_hdd(path: str, start: int, end: int):
+    async with aiofiles.open(path, "rb", executor=STREAM_POOL) as stream:
+        await stream.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            chunk = await stream.read(min(256 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
 
 
-def _iter_file_range_hdd(path: str, start: int, end: int):
-    """세마포어로 동시 접근을 제한하고, fadvise로 readahead 힌트를 준 뒤
-    큰 청크 단위로 순차 읽기. 세마포어를 쥐고 있는 동안만 실제로 디스크를
-    건드리기 때문에, 브라우저가 여러 Range를 동시에 열어도 서버 입장에서는
-    최대 MAX_CONCURRENT_READS_PER_FILE개만 실제로 seek한다."""
-    sem = _get_file_semaphore(path)
-    length = end - start + 1
-    with sem:
-        fd = os.open(path, os.O_RDONLY)
+class ManagedStreamingResponse(StreamingResponse):
+    """Release the stream slot on normal completion, disconnect and cancellation."""
+
+    async def __call__(self, scope, receive, send):
         try:
-            try:
-                os.posix_fadvise(fd, start, length, os.POSIX_FADV_SEQUENTIAL)
-                os.posix_fadvise(fd, start, length, os.POSIX_FADV_WILLNEED)
-            except (AttributeError, OSError):
-                pass  # posix_fadvise 미지원 플랫폼(macOS 등)은 조용히 건너뜀
-            os.lseek(fd, start, os.SEEK_SET)
-            remaining = length
-            while remaining > 0:
-                read_size = min(READ_CHUNK_SIZE, remaining)
-                data = os.read(fd, read_size)
-                if not data:
-                    break
-                remaining -= len(data)
-                yield data
+            await super().__call__(scope, receive, send)
         finally:
-            os.close(fd)
+            stream_slots.release()
 
 
 def _range_response(request: Request, path: str, file_size: int, media_type: str):
     range_header = request.headers.get("range")
 
     if range_header:
-        m = RANGE_RE.match(range_header)
+        m = RANGE_RE.fullmatch(range_header)
         if m:
             start_str, end_str = m.groups()
-            start = int(start_str) if start_str else 0
-            end = int(end_str) if end_str else file_size - 1
+            if not start_str and end_str:
+                start = max(0, file_size - int(end_str))
+                end = file_size - 1
+            else:
+                start = int(start_str) if start_str else 0
+                end = int(end_str) if end_str else file_size - 1
             end = min(end, file_size - 1, start + MAX_RANGE_CHUNK - 1)
 
             if start > end or start >= file_size:
-                return StreamingResponse(
+                return ManagedStreamingResponse(
                     iter(()),
                     status_code=416,
                     headers={
@@ -492,7 +473,7 @@ def _range_response(request: Request, path: str, file_size: int, media_type: str
                 "Content-Length": str(content_length),
                 "Cache-Control": "no-cache",
             }
-            return StreamingResponse(
+            return ManagedStreamingResponse(
                 _iter_file_range_hdd(path, start, end),
                 status_code=206,
                 media_type=media_type,
@@ -504,7 +485,7 @@ def _range_response(request: Request, path: str, file_size: int, media_type: str
         "Content-Length": str(file_size),
         "Cache-Control": "no-cache",
     }
-    return StreamingResponse(
+    return ManagedStreamingResponse(
         _iter_file_range_hdd(path, 0, file_size - 1),
         media_type=media_type,
         headers=headers,
@@ -516,15 +497,18 @@ def _range_response(request: Request, path: str, file_size: int, media_type: str
 
 @router.get("/api/dir_size")
 async def api_dir_size(path: str, user=Depends(require_auth)):
-    path = _safe_path(path)
-    if not os.path.exists(path) or not os.path.isdir(path):
-        raise HTTPException(status_code=404, detail="Directory not found")
-    size = get_dir_size(path)
-    return {"path": path, "size_raw": size, "size": FileService.format_size(size)}
+    path = await run_in_threadpool(_safe_path, path)
+    result = await run_file_job("size", path=path)
+    return {
+        "path": path,
+        "size_raw": result["size_raw"],
+        "size": FileService.format_size(result["size_raw"]),
+    }
 
 
 @router.get("/search")
-async def search(
+@search_io
+def search(
     request: Request,
     q: str = "",
     path: str = None,
@@ -534,16 +518,20 @@ async def search(
     order: str = "asc",
     user=Depends(require_auth),
 ):
-    search_root = _safe_path(path) if path else os.path.abspath(ROOT_DIR)
+    search_root = _safe_path(path) if path else os.path.abspath(get_root())
     if not os.path.isdir(search_root):
-        search_root = os.path.abspath(ROOT_DIR)
+        search_root = os.path.abspath(get_root())
     if q:
         # 디스크 전체를 훑는 무거운 작업이라 이벤트 루프를 막지 않도록 별도 스레드에서 실행
-        all_results, truncated = await run_in_threadpool(FileService.search_recursive, search_root, q)
+        all_results, truncated = FileService.search_recursive(
+            search_root, q, time_budget=2.0
+        )
     else:
         all_results, truncated = [], False
     items = []
     for item in all_results:
+        if not visible_path(item["path"]):
+            continue
         if item.get("is_dir"):
             items.append(
                 {
@@ -564,6 +552,7 @@ async def search(
                 }
             )
 
+    page_size = max(1, min(page_size, 2000))
     reverse = order == "desc"
     key_map = {
         # 관련도순은 파일/폴더 구분 없이 검색어와 얼마나 잘 맞는지만으로 정렬
@@ -592,11 +581,11 @@ async def search(
             "items": paged_items,
             "query": q,
             "mode": "search",
-            "current_path": ROOT_DIR,
+            "current_path": get_root(),
             "search_root": search_root,
             "folder_name": folder_name,
             "parent_path": None,
-            "root_path": ROOT_DIR,
+            "root_path": get_root(),
             "breadcrumbs": [],
             "total": total,
             "page": page,
@@ -605,12 +594,14 @@ async def search(
             "sort": sort,
             "order": order,
             "username": user,
+            "csrf_token": request.state.csrf_token,
         },
     )
 
 
 @router.get("/view")
-async def view(
+@file_io
+def view(
     request: Request,
     path: str = None,
     page: int = 1,
@@ -620,7 +611,7 @@ async def view(
     show_hidden: int = 0,
     user=Depends(require_auth),
 ):
-    current_path = _safe_path(path) if path else os.path.abspath(ROOT_DIR)
+    current_path = _safe_path(path) if path else os.path.abspath(get_root())
     if not os.path.exists(current_path):
         raise HTTPException(status_code=404, detail="Path not found")
 
@@ -632,19 +623,27 @@ async def view(
         )
 
     items = []
+    scan_truncated = False
     try:
-        for entry in os.scandir(current_path):
+        deadline = time.monotonic() + 2
+        for index, entry in enumerate(os.scandir(current_path)):
+            if index >= 50000 or time.monotonic() > deadline:
+                scan_truncated = True
+                break
+            if not visible_path(entry.path):
+                continue
             try:
-                if entry.path == TRASH_DIR:
+                if entry.path == _trash_root():
                     continue
                 if not show_hidden and entry.name.startswith("."):
                     continue
                 items.append(build_file_info(entry))
-            except (PermissionError, OSError):
+            except PermissionError, OSError:
                 continue
     except PermissionError:
         raise HTTPException(status_code=403, detail="Permission denied")
 
+    page_size = max(1, min(page_size, 2000))
     reverse = order == "desc"
     key_map = {
         "name": lambda x: (not x["is_dir"], x["name"].lower()),
@@ -660,20 +659,20 @@ async def view(
     paged_items = items[(page - 1) * page_size : page * page_size]
 
     parent_path = os.path.dirname(current_path)
-    if not os.path.abspath(parent_path).startswith(os.path.abspath(ROOT_DIR)):
+    if current_path == os.path.realpath(get_root()):
         parent_path = None
 
     breadcrumbs = []
-    rel = os.path.relpath(current_path, ROOT_DIR)
+    rel = os.path.relpath(current_path, get_root())
     if rel != ".":
         parts = rel.split(os.sep)
-        accumulated = ROOT_DIR
-        breadcrumbs.append({"name": "Root", "path": ROOT_DIR})
+        accumulated = get_root()
+        breadcrumbs.append({"name": "Root", "path": get_root()})
         for part in parts:
             accumulated = os.path.join(accumulated, part)
             breadcrumbs.append({"name": part, "path": accumulated})
     else:
-        breadcrumbs.append({"name": "Root", "path": ROOT_DIR})
+        breadcrumbs.append({"name": "Root", "path": get_root()})
 
     return templates.TemplateResponse(
         name="explorer.html",
@@ -686,7 +685,8 @@ async def view(
             "current_path": current_path,
             "folder_name": os.path.basename(current_path) if rel != "." else "Root",
             "parent_path": parent_path,
-            "root_path": ROOT_DIR,
+            "root_path": get_root(),
+            "scan_truncated": scan_truncated,
             "breadcrumbs": breadcrumbs,
             "total": total,
             "page": page,
@@ -695,12 +695,14 @@ async def view(
             "sort": sort,
             "order": order,
             "username": user,
+            "csrf_token": request.state.csrf_token,
         },
     )
 
 
 @router.get("/download_file")
-async def download_file(path: str, user=Depends(require_auth)):
+@file_io
+def download_file(path: str, user=Depends(require_auth)):
     path = _safe_path(path)
     if not os.path.exists(path) or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -712,7 +714,8 @@ async def download_file(path: str, user=Depends(require_auth)):
 
 
 @router.get("/serve_file")
-async def serve_file(request: Request, path: str, user=Depends(require_auth)):
+@file_io
+def serve_file(request: Request, path: str, user=Depends(require_auth)):
     """미리보기/재생용 엔드포인트. 로컬 HDD의 랜덤 seek 비용을 줄이기 위해
     동시 읽기 제한 + fadvise + 큰 청크 순차읽기를 쓰는 커스텀 스트리밍을 사용."""
     path = _safe_path(path)
@@ -720,25 +723,56 @@ async def serve_file(request: Request, path: str, user=Depends(require_auth)):
         raise HTTPException(status_code=404, detail="File not found")
     media_type = guess_media_type(path)
     file_size = os.path.getsize(path)
-    return _range_response(request, path, file_size, media_type)
+    if (
+        media_type.startswith("image/")
+        and file_size > 16 * 1024**2
+        or media_type == "application/pdf"
+        and file_size > 32 * 1024**2
+    ):
+        raise HTTPException(413, "큰 이미지와 PDF는 다운로드해서 열어주세요.")
+    if not stream_slots.acquire(blocking=False):
+        raise HTTPException(
+            503, "동시 미디어 읽기 제한입니다. 잠시 후 다시 시도하세요."
+        )
+    try:
+        response = _range_response(request, path, file_size, media_type)
+        return response
+    except BaseException:
+        stream_slots.release()
+        raise
 
 
 @router.get("/api/list")
-async def api_list(
-    path: str, page: int = 1, page_size: int = 200, user=Depends(require_auth)
+@file_io
+def api_list(
+    path: str,
+    page: int = 1,
+    page_size: int = 200,
+    directories_only: bool = False,
+    user=Depends(require_auth),
 ):
+    page_size = max(1, min(page_size, 2000))
     path = _safe_path(path)
     if not os.path.exists(path):
         return {"items": [], "total": 0, "page": 1, "total_pages": 1}
 
     items = []
+    scan_truncated = False
     try:
-        for entry in os.scandir(path):
+        deadline = time.monotonic() + 2
+        for index, entry in enumerate(os.scandir(path)):
+            if index >= 50000 or time.monotonic() > deadline:
+                scan_truncated = True
+                break
+            if not visible_path(entry.path):
+                continue
+            if directories_only and not entry.is_dir(follow_symlinks=False):
+                continue
             try:
-                if entry.path == TRASH_DIR:
+                if entry.path == _trash_root():
                     continue
                 items.append(build_file_info(entry))
-            except (PermissionError, OSError):
+            except PermissionError, OSError:
                 continue
     except PermissionError:
         return {"items": [], "total": 0, "page": 1, "total_pages": 1}
@@ -754,41 +788,56 @@ async def api_list(
         "total": total,
         "page": page,
         "total_pages": total_pages,
+        "truncated": scan_truncated,
     }
 
 
 @router.get("/api/file_info")
-async def api_file_info(path: str, user=Depends(require_auth)):
+@file_io
+def api_file_info(path: str, user=Depends(require_auth)):
     path = _safe_path(path)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Not found")
     info = build_file_info(path, is_scandir=False)
     previewable_as_text = info["type"] == "text" or (
-        info["type"] == "other"
-        and 0 < info["size_raw"] < 2 * 1024 * 1024
-        and _looks_like_text(path)
+        info["type"] == "other" and 0 < info["size_raw"] and _looks_like_text(path)
     )
-    if previewable_as_text and info["size_raw"] < 2 * 1024 * 1024:
+    if previewable_as_text:
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                info["content"] = f.read(200_000)
+            with open(path, "rb") as f:
+                info["content"] = f.read(128 * 1024).decode("utf-8", errors="replace")
+                info["content_truncated"] = info["size_raw"] > 128 * 1024
         except Exception:
             info["content"] = None
     return info
 
 
 def _reject_separator(name: str, label: str = "이름"):
-    if not name or os.sep in name or (os.altsep and os.altsep in name):
-        raise HTTPException(status_code=400, detail=f"{label}에 경로 구분자를 포함할 수 없습니다")
+    if (
+        not name
+        or name in {".", ".."}
+        or "\x00" in name
+        or "\\" in name
+        or os.sep in name
+        or (os.altsep and os.altsep in name)
+    ):
+        raise HTTPException(
+            status_code=400, detail=f"{label}에 경로 구분자를 포함할 수 없습니다"
+        )
 
 
 @router.delete("/api/delete")
-async def api_delete(body: DeleteBody, user=Depends(require_auth)):
+@file_io
+def api_delete(body: DeleteBody, user=Depends(require_auth)):
+    if _safe_path(body.path) == get_root():
+        raise HTTPException(403, "루트 디렉토리는 변경하거나 삭제할 수 없습니다.")
     path = _safe_path(body.path)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Not found")
-    if path == TRASH_DIR or os.path.dirname(path) == TRASH_DIR:
-        raise HTTPException(status_code=400, detail="휴지통 항목은 휴지통 API로 삭제하세요")
+    if path == _trash_root() or os.path.dirname(path) == _trash_root():
+        raise HTTPException(
+            status_code=400, detail="휴지통 항목은 휴지통 API로 삭제하세요"
+        )
 
     name = os.path.basename(path)
     is_dir = os.path.isdir(path)
@@ -812,7 +861,10 @@ async def api_delete(body: DeleteBody, user=Depends(require_auth)):
 
 
 @router.post("/api/rename")
-async def api_rename(body: RenameBody, user=Depends(require_auth)):
+@file_io
+def api_rename(body: RenameBody, user=Depends(require_auth)):
+    if _safe_path(body.path) == get_root():
+        raise HTTPException(403, "루트 디렉토리는 변경하거나 삭제할 수 없습니다.")
     _reject_separator(body.new_name, "새 이름")
     src = _safe_path(body.path)
     dst = _safe_path(os.path.join(os.path.dirname(src), body.new_name))
@@ -828,7 +880,8 @@ async def api_rename(body: RenameBody, user=Depends(require_auth)):
 
 
 @router.post("/api/mkdir")
-async def api_mkdir(body: MkdirBody, user=Depends(require_auth)):
+@file_io
+def api_mkdir(body: MkdirBody, user=Depends(require_auth)):
     _reject_separator(body.name, "폴더 이름")
     parent = _safe_path(body.parent)
     new_dir = _safe_path(os.path.join(parent, body.name))
@@ -842,7 +895,8 @@ async def api_mkdir(body: MkdirBody, user=Depends(require_auth)):
 
 
 @router.post("/api/newfile")
-async def api_newfile(body: MkdirBody, user=Depends(require_auth)):
+@file_io
+def api_newfile(body: MkdirBody, user=Depends(require_auth)):
     _reject_separator(body.name, "파일 이름")
     parent = _safe_path(body.parent)
     new_path = _safe_path(os.path.join(parent, body.name))
@@ -856,18 +910,9 @@ async def api_newfile(body: MkdirBody, user=Depends(require_auth)):
 
 @router.post("/api/duplicate")
 async def api_duplicate(body: DuplicateBody, user=Depends(require_auth)):
-    src = _safe_path(body.path)
-    if not os.path.exists(src):
-        raise HTTPException(status_code=404, detail="Not found")
-    dest = _next_available_name(src)
-    try:
-        if os.path.isdir(src):
-            shutil.copytree(src, dest)
-        else:
-            shutil.copy2(src, dest)
-    except OSError as e:
-        _raise_fs_error(e)
-    return {"ok": True, "new_path": dest}
+    src = await run_in_threadpool(_safe_path, body.path)
+    dest = await run_in_threadpool(lambda: _safe_path(_next_available_name(src)))
+    return await run_file_job("copy", src=src, dst=dest)
 
 
 def _safe_getsize(path: str) -> int:
@@ -878,14 +923,15 @@ def _safe_getsize(path: str) -> int:
 
 
 @router.get("/api/trash/list")
-async def api_trash_list(user=Depends(require_auth)):
+@file_io
+def api_trash_list(user=Depends(require_auth)):
     with _trash_meta_lock:
         meta = _load_trash_meta()
     items = []
     for tid, info in meta.items():
-        entry_path = os.path.join(_trash_dir(), tid)
+        entry_path = safe_path(os.path.join(_trash_dir(), tid), allow_trash=True)
         if os.path.isdir(entry_path):
-            size = get_dir_size(entry_path)
+            size = 0
         else:
             size = _safe_getsize(entry_path)
         items.append(
@@ -904,20 +950,23 @@ async def api_trash_list(user=Depends(require_auth)):
 
 
 @router.post("/api/trash/restore")
-async def api_trash_restore(body: TrashRestoreBody, user=Depends(require_auth)):
+@file_io
+def api_trash_restore(body: TrashRestoreBody, user=Depends(require_auth)):
     with _trash_meta_lock:
+        if not re.fullmatch(r"[0-9a-f]{32}", body.id):
+            raise HTTPException(400, "잘못된 휴지통 ID입니다.")
         meta = _load_trash_meta()
         info = meta.get(body.id)
         if not info:
             raise HTTPException(status_code=404, detail="휴지통에서 찾을 수 없습니다")
 
-        src = os.path.join(_trash_dir(), body.id)
+        src = safe_path(os.path.join(_trash_dir(), body.id), allow_trash=True)
         if not os.path.exists(src):
             del meta[body.id]
             _save_trash_meta(meta)
             raise HTTPException(status_code=404, detail="휴지통 파일이 유실되었습니다")
 
-        dest = info["original_path"]
+        dest = _safe_path(info["original_path"])
         try:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
         except OSError as e:
@@ -936,12 +985,13 @@ async def api_trash_restore(body: TrashRestoreBody, user=Depends(require_auth)):
 
 
 @router.delete("/api/trash/empty")
-async def api_trash_empty(user=Depends(require_auth)):
+@file_io
+def api_trash_empty(user=Depends(require_auth)):
     with _trash_meta_lock:
         meta = _load_trash_meta()
         errors = []
         for tid in list(meta.keys()):
-            entry_path = os.path.join(_trash_dir(), tid)
+            entry_path = safe_path(os.path.join(_trash_dir(), tid), allow_trash=True)
             try:
                 if os.path.exists(entry_path):
                     if meta[tid]["is_dir"]:
@@ -949,7 +999,7 @@ async def api_trash_empty(user=Depends(require_auth)):
                     else:
                         os.remove(entry_path)
             except OSError as e:
-                errors.append(f'{meta[tid]["name"]}: {e}')
+                errors.append(f"{meta[tid]['name']}: {e}")
                 continue
             del meta[tid]
         _save_trash_meta(meta)
@@ -957,13 +1007,14 @@ async def api_trash_empty(user=Depends(require_auth)):
 
 
 @router.delete("/api/trash/{trash_id}")
-async def api_trash_delete(trash_id: str, user=Depends(require_auth)):
+@file_io
+def api_trash_delete(trash_id: str, user=Depends(require_auth)):
     with _trash_meta_lock:
         meta = _load_trash_meta()
         info = meta.get(trash_id)
         if not info:
             raise HTTPException(status_code=404, detail="찾을 수 없습니다")
-        entry_path = os.path.join(_trash_dir(), trash_id)
+        entry_path = safe_path(os.path.join(_trash_dir(), trash_id), allow_trash=True)
         try:
             if os.path.exists(entry_path):
                 if info["is_dir"]:
@@ -979,141 +1030,99 @@ async def api_trash_delete(trash_id: str, user=Depends(require_auth)):
 
 @router.post("/api/move")
 async def api_move(body: MoveBody, user=Depends(require_auth)):
-    src = _safe_path(body.src)
-    dst_dir = _safe_path(body.dst_dir)
-    if not os.path.exists(src):
-        raise HTTPException(status_code=404, detail="Not found")
-    dst = os.path.join(dst_dir, os.path.basename(src))
-    if os.path.exists(dst):
-        raise HTTPException(status_code=409, detail="대상에 같은 이름이 존재합니다")
-    try:
-        shutil.move(src, dst)
-    except OSError as e:
-        _raise_fs_error(e)
-    return {"ok": True, "new_path": dst}
+    src = await run_in_threadpool(_safe_path, body.src)
+    if src == get_root():
+        raise HTTPException(403, "루트 디렉토리는 이동할 수 없습니다.")
+    dst = await run_in_threadpool(
+        lambda: _safe_path(os.path.join(body.dst_dir, os.path.basename(src)))
+    )
+    return await run_file_job("move", src=src, dst=dst)
 
 
 @router.post("/api/copy")
 async def api_copy(body: CopyBody, user=Depends(require_auth)):
-    src = _safe_path(body.src)
-    dst_dir = _safe_path(body.dst_dir)
-    if not os.path.exists(src):
-        raise HTTPException(status_code=404, detail="Not found")
-    dst = os.path.join(dst_dir, os.path.basename(src))
-    if os.path.exists(dst):
-        raise HTTPException(status_code=409, detail="대상에 같은 이름이 존재합니다")
-    try:
-        if os.path.isdir(src):
-            shutil.copytree(src, dst)
-        else:
-            shutil.copy2(src, dst)
-    except OSError as e:
-        _raise_fs_error(e)
-    return {"ok": True, "new_path": dst}
+    src = await run_in_threadpool(_safe_path, body.src)
+    dst = await run_in_threadpool(
+        lambda: _safe_path(os.path.join(body.dst_dir, os.path.basename(src)))
+    )
+    return await run_file_job("copy", src=src, dst=dst)
 
 
 @router.post("/api/upload")
 async def api_upload(
-    path: str,
-    files: list[UploadFile] = FastAPIFile(...),
-    user=Depends(require_auth),
+    path: str, files: list[UploadFile] = FastAPIFile(...), user=Depends(require_auth)
 ):
-    dir_path = _safe_path(path)
-    if not os.path.isdir(dir_path):
-        raise HTTPException(status_code=400, detail="대상이 디렉토리가 아닙니다")
-    saved = []
-    renamed = {}
+    if not upload_slots.acquire(blocking=False):
+        raise HTTPException(
+            503, "다른 업로드가 실행 중입니다. 잠시 후 다시 시도하세요."
+        )
     try:
+        dir_path = await run_in_threadpool(_safe_path, path)
+        if not await run_in_threadpool(os.path.isdir, dir_path):
+            raise HTTPException(400, "대상이 디렉토리가 아닙니다.")
+        if len(files) > 100:
+            raise HTTPException(413, "한 번에 최대 100개 파일을 업로드할 수 있습니다.")
+        saved, renamed = [], {}
         for file in files:
-            dst = os.path.join(dir_path, file.filename)
-            if os.path.exists(dst):
-                new_dst = _next_available_name(dst)
-                renamed[file.filename] = os.path.basename(new_dst)
-                dst = new_dst
-            with open(dst, "wb") as f:
-                f.write(await file.read())
+            _reject_separator(file.filename or "")
+            dst = await run_in_threadpool(
+                lambda: _safe_path(os.path.join(dir_path, file.filename))
+            )
+            if await run_in_threadpool(os.path.exists, dst):
+                dst = await run_in_threadpool(_next_available_name, dst)
+                renamed[file.filename] = os.path.basename(dst)
+            received = 0
+            try:
+                async with aiofiles.open(dst, "xb", executor=UPLOAD_POOL) as output:
+                    while chunk := await file.read(256 * 1024):
+                        received += len(chunk)
+                        if received > 1024**3:
+                            raise HTTPException(
+                                413, "파일은 최대 1GB까지 업로드할 수 있습니다."
+                            )
+                        await output.write(chunk)
+            except BaseException:
+                if received and await run_in_threadpool(os.path.exists, dst):
+                    await run_in_threadpool(os.unlink, dst)
+                raise
+            finally:
+                await file.close()
             saved.append(os.path.basename(dst))
-    except OSError as e:
-        _raise_fs_error(e)
-    return {"ok": True, "saved": saved, "renamed": renamed}
+        return {"ok": True, "saved": saved, "renamed": renamed}
+    finally:
+        upload_slots.release()
 
 
 @router.post("/api/compress")
 async def api_compress(body: CompressBody, user=Depends(require_auth)):
-    import zipfile
-
-    out_dir = _safe_path(body.output_dir)
-    out_path = os.path.join(out_dir, body.output_name + ".zip")
-    try:
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in body.paths:
-                p = _safe_path(p)
-                if os.path.isdir(p):
-                    for root, _, files in os.walk(p):
-                        for f in files:
-                            full = os.path.join(root, f)
-                            zf.write(full, os.path.relpath(full, os.path.dirname(p)))
-                else:
-                    zf.write(p, os.path.basename(p))
-    except OSError as e:
-        if os.path.exists(out_path):
-            os.unlink(out_path)
-        _raise_fs_error(e)
-    return {"ok": True, "path": out_path}
+    _reject_separator(body.output_name)
+    output = await run_in_threadpool(
+        lambda: _safe_path(os.path.join(body.output_dir, body.output_name + ".zip"))
+    )
+    return await run_file_job("compress", paths=body.paths, output=output)
 
 
 @router.post("/api/extract")
 async def api_extract(path: str, user=Depends(require_auth)):
-    import zipfile, tarfile
-
-    path = _safe_path(path)
-    out_dir = os.path.splitext(path)[0]
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-        if zipfile.is_zipfile(path):
-            with zipfile.ZipFile(path) as zf:
-                zf.extractall(out_dir)
-        elif tarfile.is_tarfile(path):
-            with tarfile.open(path) as tf:
-                tf.extractall(out_dir)
-        else:
-            raise HTTPException(status_code=400, detail="지원하지 않는 압축 형식")
-    except OSError as e:
-        _raise_fs_error(e)
-    return {"ok": True, "extracted_to": out_dir}
+    path = await run_in_threadpool(_safe_path, path)
+    return await run_file_job("extract", path=path, output=os.path.splitext(path)[0])
 
 
 @router.get("/download_dir")
 async def download_dir(path: str, user=Depends(require_auth)):
-    import zipfile
-
-    path = _safe_path(path)
-    if not os.path.exists(path) or not os.path.isdir(path):
-        raise HTTPException(status_code=404, detail="Directory not found")
-
-    dir_name = os.path.basename(path)
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-    tmp.close()
-
+    path = await run_in_threadpool(_safe_path, path)
+    temporary = await run_in_threadpool(
+        lambda: tempfile.mkdtemp(prefix="linuxplorer-archive-")
+    )
+    output = os.path.join(temporary, "download.zip")
     try:
-        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(path):
-                dirs[:] = [d for d in dirs if not d.startswith(".")]
-                for file in files:
-                    full = os.path.join(root, file)
-                    arcname = os.path.join(dir_name, os.path.relpath(full, path))
-                    zf.write(full, arcname)
-    except Exception as e:
-        os.unlink(tmp.name)
-        raise HTTPException(status_code=500, detail=str(e))
-
-    # 기존 코드는 응답 후 임시 zip을 지우는 로직이 없어서 디스크에 계속 쌓였다.
-    # BackgroundTask로 응답 전송이 끝난 뒤 삭제하도록 수정.
+        await run_file_job("compress", paths=[path], output=output, temporary=True)
+    except BaseException:
+        await run_in_threadpool(shutil.rmtree, temporary, True)
+        raise
     return FileResponse(
-        path=tmp.name,
-        filename=f"{dir_name}.zip",
+        output,
+        filename=(os.path.basename(path) or "root") + ".zip",
         media_type="application/zip",
-        background=BackgroundTask(os.unlink, tmp.name),
-        headers={"Content-Disposition": f'attachment; filename="{dir_name}.zip"'},
+        background=BackgroundTask(shutil.rmtree, temporary, True),
     )
